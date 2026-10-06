@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { createZodDto } from "nestjs-zod";
 
-/** `password` is omitted by accounts that have none (Google- or passkey-only); the service enforces it for the rest. */
+/** `password` is omitted by accounts that have none (Google-only); the service enforces it for the rest. */
 export const twoFactorDisableSchema = z.strictObject({
     password: z.string().min(1).optional(),
     code: z.string().regex(/^\d{6}$/),

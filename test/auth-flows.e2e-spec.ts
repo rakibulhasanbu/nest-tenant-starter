@@ -189,7 +189,7 @@ describe("Auth and admin flows (e2e)", () => {
             const { id, email } = await createUser();
             const { accessToken } = await signIn(email);
 
-            // Stand in for a Google- or passkey-only account: those never get a
+            // Stand in for a Google-only account: those never get a
             // password, and signing in as one is impossible by definition.
             await prisma.user.update({ where: { id }, data: { password: null } });
 

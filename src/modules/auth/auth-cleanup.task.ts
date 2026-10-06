@@ -4,15 +4,9 @@ import { Cron, CronExpression } from "@nestjs/schedule";
 import type { Env } from "@/config/env.schema.js";
 import { EmailTokensService } from "@/modules/auth/email-tokens.service.js";
 import { TokensService } from "@/modules/auth/tokens.service.js";
-import { WebauthnService } from "@/modules/auth/webauthn.service.js";
 import { UsersService } from "@/modules/users/users.service.js";
 
-/**
- * None of these tables had anything removing rows from them. Refresh tokens and
- * email codes merely accumulated, but WebAuthn challenges were worse: the
- * usernameless login flow mints one per call from a public, unauthenticated
- * endpoint, so anyone could grow that table without limit.
- */
+/** Refresh tokens and email codes had nothing removing rows from them, so they accumulated forever. */
 const REVOKED_REFRESH_TOKEN_RETENTION_DAYS = 7;
 
 @Injectable()
@@ -22,24 +16,19 @@ export class AuthCleanupTask {
     constructor(
         private readonly tokensService: TokensService,
         private readonly emailTokensService: EmailTokensService,
-        private readonly webauthnService: WebauthnService,
         private readonly usersService: UsersService,
         private readonly configService: ConfigService<Env, true>,
     ) {}
 
     @Cron(CronExpression.EVERY_HOUR)
     async purgeExpiredAuthArtifacts(): Promise<void> {
-        const [refreshTokens, emailTokens, challenges] = await Promise.all([
+        const [refreshTokens, emailTokens] = await Promise.all([
             this.tokensService.purgeExpired(REVOKED_REFRESH_TOKEN_RETENTION_DAYS),
             this.emailTokensService.purgeExpired(),
-            this.webauthnService.purgeExpiredChallenges(),
         ]);
 
-        if (refreshTokens + emailTokens + challenges > 0) {
-            this.logger.log(
-                `Purged ${refreshTokens} refresh token(s), ${emailTokens} email token(s), ` +
-                    `${challenges} WebAuthn challenge(s)`,
-            );
+        if (refreshTokens + emailTokens > 0) {
+            this.logger.log(`Purged ${refreshTokens} refresh token(s), ${emailTokens} email token(s)`);
         }
     }
 

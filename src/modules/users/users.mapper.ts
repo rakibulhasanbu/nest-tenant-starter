@@ -15,7 +15,7 @@ export type PublicUser = Omit<
     roleIds: string[];
     profile: PublicUserProfile | null;
     /**
-     * Whether password login is set up. Google- and passkey-only accounts have
+     * Whether password login is set up. Google-only accounts have
      * no password, and without this flag a client cannot tell whether to offer
      * "change password" (needs the current one) or "set password" — the two
      * endpoints reject each other's case with a 400.

@@ -5,13 +5,10 @@ import { randomUUID } from "node:crypto";
 import { resolveDeviceInfo } from "@/common/utils/device.util.js";
 import type { Env } from "@/config/env.schema.js";
 import { AuthProvider, EmailTokenType, UserStatus } from "@/database/generated/prisma/enums.js";
-import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import { EMAIL_SENDER, type EmailSender } from "@/integrations/email/email-sender.interface.js";
 import { EmailTokensService } from "@/modules/auth/email-tokens.service.js";
 import { GoogleAuthService } from "@/modules/auth/google-auth.service.js";
 import { SocialIdentitiesService } from "@/modules/auth/social-identities.service.js";
-import { WebauthnService } from "@/modules/auth/webauthn.service.js";
-import { WebauthnCredentialsService } from "@/modules/auth/webauthn-credentials.service.js";
 import { TwoFactorService } from "@/modules/auth/two-factor.service.js";
 import type { SignupInput } from "@/modules/auth/dto/signup.schema.js";
 import type { SigninInput } from "@/modules/auth/dto/signin.schema.js";
@@ -33,8 +30,6 @@ export class AuthService {
         private readonly emailTokensService: EmailTokensService,
         private readonly socialIdentitiesService: SocialIdentitiesService,
         private readonly googleAuthService: GoogleAuthService,
-        private readonly webauthnService: WebauthnService,
-        private readonly webauthnCredentialsService: WebauthnCredentialsService,
         private readonly twoFactorService: TwoFactorService,
         private readonly permissionsService: PermissionsService,
         private readonly configService: ConfigService<Env, true>,
@@ -441,91 +436,6 @@ export class AuthService {
         return toPublicUser(user);
     }
 
-    /** Only logged-in users can register a passkey — it's added to an existing account, not used to create one. */
-    async getWebauthnRegistrationOptions(userId: string) {
-        const user = await this.usersService.findById(userId);
-        if (!user || user.deletedAt) {
-            throw new UnauthorizedException("Invalid credentials");
-        }
-        return this.webauthnService.createRegistrationOptions(user);
-    }
-
-    async verifyWebauthnRegistration(
-        userId: string,
-        credential: RegistrationResponseJSON,
-        deviceName?: string,
-    ): Promise<void> {
-        await this.webauthnService.verifyRegistration(userId, credential, deviceName);
-    }
-
-    async getWebauthnLoginOptions(email: string) {
-        const user = await this.usersService.findByEmail(email);
-        if (!user || user.deletedAt) {
-            throw new UnauthorizedException("No passkeys registered for this account");
-        }
-        return this.webauthnService.createAuthenticationOptions(user.id);
-    }
-
-    async loginWithWebauthn(
-        email: string,
-        credential: AuthenticationResponseJSON,
-        context: LoginContext,
-        explicitDevice?: { deviceType?: string; deviceName?: string },
-    ) {
-        const user = await this.usersService.findByEmail(email);
-        if (!user || user.deletedAt || user.status === UserStatus.SUSPENDED) {
-            throw new UnauthorizedException("This account is not available");
-        }
-
-        await this.assertEmailVerified(user);
-
-        await this.webauthnService.verifyAuthentication(user.id, credential);
-
-        return this.issueSession(user, context, explicitDevice);
-    }
-
-    getUsernamelessWebauthnLoginOptions() {
-        return this.webauthnService.createUsernamelessAuthenticationOptions();
-    }
-
-    async loginWithWebauthnUsernameless(credential: AuthenticationResponseJSON, context: LoginContext) {
-        const { userId } = await this.webauthnService.verifyUsernamelessAuthentication(credential);
-
-        const user = await this.usersService.findById(userId);
-        if (!user || user.deletedAt || user.status === UserStatus.SUSPENDED) {
-            throw new UnauthorizedException("This account is not available");
-        }
-
-        await this.assertEmailVerified(user);
-
-        return this.issueSession(user, context);
-    }
-
-    /**
-     * Email verification gates every login method, not just password. A passkey
-     * can only be registered from an already-authenticated session, so this is
-     * normally unreachable — it exists so the rule holds no matter how the
-     * credential got there.
-     */
-    private async assertEmailVerified(user: { id: string; email: string; status: UserStatus }): Promise<void> {
-        if (user.status !== UserStatus.PENDING_VERIFICATION) return;
-
-        await this.sendVerificationEmail(user.id, user.email);
-        throw new UnauthorizedException({
-            code: "EMAIL_NOT_VERIFIED",
-            message: "Please verify your email before logging in",
-        });
-    }
-
-    async listWebauthnCredentials(userId: string) {
-        const credentials = await this.webauthnCredentialsService.listByUserId(userId);
-        return credentials.map(({ publicKey: _publicKey, counter: _counter, ...credential }) => credential);
-    }
-
-    async removeWebauthnCredential(userId: string, credentialId: string): Promise<void> {
-        await this.webauthnCredentialsService.remove(userId, credentialId);
-    }
-
     /**
      * Refused while 2FA is already on. Issuing a fresh secret here would leave the
      * account enrolled against a secret nobody has yet, so the old behaviour was
@@ -550,8 +460,8 @@ export class AuthService {
     }
 
     /**
-     * The password check is skipped for accounts that have none — Google- and
-     * passkey-only users. Requiring it there made 2FA impossible to turn off once
+     * The password check is skipped for accounts that have none — Google-only
+     * users. Requiring it there made 2FA impossible to turn off once
      * enabled, with no recovery path short of a support ticket; the authenticator
      * code is the strongest proof those accounts can offer.
      */

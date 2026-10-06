@@ -36,8 +36,8 @@ Personal details live in the `user_profiles` table and are nested under
 `gender` is a 400.
 
 `toPublicUser` is the only way a `User` reaches a client, and it drops every
-secret. It adds `hasPassword`, so a client can offer set-password to Google- and
-passkey-only accounts instead of change-password.
+secret. It adds `hasPassword`, so a client can offer set-password to Google-only
+accounts instead of change-password.
 
 `/users/me` alone returns `permissions[]` and `maxRank` via `toCurrentUser` —
 they describe the *requester*, so never attach them to another user's record.

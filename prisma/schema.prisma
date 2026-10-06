@@ -83,7 +83,6 @@ model User {
     refreshTokens       RefreshToken[]
     emailTokens         EmailToken[]
     socialIdentities    SocialIdentity[]
-    webauthnCredentials WebauthnCredential[]
 
     @@map("users")
 }
@@ -252,34 +251,4 @@ model SocialIdentity {
     @@unique([userId, provider])
     @@index([userId])
     @@map("social_identities")
-}
-
-model WebauthnCredential {
-    id           String   @id @default(cuid())
-    userId       String   @map("user_id")
-    credentialId String   @unique @map("credential_id")
-    publicKey    Bytes    @map("public_key")
-    counter      BigInt   @default(0)
-    deviceName   String?  @map("device_name")
-    transports   String[]
-
-    createdAt  DateTime  @default(now()) @map("created_at")
-    lastUsedAt DateTime? @map("last_used_at")
-
-    user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-    @@index([userId])
-    @@map("webauthn_credentials")
-}
-
-model WebauthnChallenge {
-    id        String   @id @default(cuid())
-    userId    String?  @map("user_id")
-    challenge String   @unique
-    type      String
-    expiresAt DateTime @map("expires_at")
-    createdAt DateTime @default(now()) @map("created_at")
-
-    @@index([expiresAt])
-    @@map("webauthn_challenges")
 }

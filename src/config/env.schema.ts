@@ -62,11 +62,6 @@ const baseEnvSchema = z.object({
 
     GOOGLE_CLIENT_ID: z.string().min(1),
 
-    WEBAUTHN_RP_ID: z.string().min(1).default("localhost"),
-    WEBAUTHN_RP_NAME: z.string().min(1).default("Nest Starter"),
-    WEBAUTHN_ORIGIN: z.url().default("http://localhost:3000"),
-    WEBAUTHN_CHALLENGE_TTL_MINUTES: z.coerce.number().default(5),
-
     TWO_FACTOR_APP_NAME: z.string().min(1).default("Nest Starter"),
     /**
      * Length alone was not enough: `Buffer.from(key, "hex")` silently yields zero

@@ -47,8 +47,6 @@ function buildService(user: UserWithRoles | null) {
         {} as never,
         {} as never,
         {} as never,
-        {} as never,
-        {} as never,
         permissionsService as never,
         configService as never,
         emailSender as never,
