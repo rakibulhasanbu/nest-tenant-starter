@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { authenticator } from "otplib";
+import { generateSecret, generateURI, verifySync } from "otplib";
 import * as QRCode from "qrcode";
 import { decrypt, encrypt } from "@/common/utils/encryption.util.js";
 import { generateRecoveryCodes, hashToken } from "@/common/utils/token.util.js";
@@ -21,12 +21,12 @@ export class TwoFactorService {
      * drop 2FA without the password and live code that disable() requires.
      */
     async setup(userId: string, email: string): Promise<{ otpauthUrl: string; qrCodeDataUrl: string }> {
-        const secret = authenticator.generateSecret();
-        const otpauthUrl = authenticator.keyuri(
-            email,
-            this.configService.get("TWO_FACTOR_APP_NAME", { infer: true }),
+        const secret = generateSecret();
+        const otpauthUrl = generateURI({
+            issuer: this.configService.get("TWO_FACTOR_APP_NAME", { infer: true }),
+            label: email,
             secret,
-        );
+        });
 
         await this.prisma.user.update({
             where: { id: userId },
@@ -45,7 +45,7 @@ export class TwoFactorService {
         }
 
         const secret = decrypt(user.twoFactorSecret, this.getEncryptionKey());
-        if (!authenticator.verify({ token: code, secret })) {
+        if (!verifySync({ token: code, secret }).valid) {
             throw new BadRequestException("Invalid authenticator code");
         }
 
@@ -83,7 +83,7 @@ export class TwoFactorService {
         }
 
         const secret = decrypt(user.twoFactorSecret, this.getEncryptionKey());
-        if (!authenticator.verify({ token: code, secret })) {
+        if (!verifySync({ token: code, secret }).valid) {
             return false;
         }
 
@@ -120,7 +120,10 @@ export class TwoFactorService {
     }
 }
 
+/** otplib default TOTP period. */
+const TOTP_STEP_SECONDS = 30;
+
 /** The time-step a TOTP code belongs to — the unit otplib validates against. */
 function currentTimeStep(): number {
-    return Math.floor(Date.now() / 1000 / (authenticator.options.step ?? 30));
+    return Math.floor(Date.now() / 1000 / TOTP_STEP_SECONDS);
 }
