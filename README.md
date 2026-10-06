@@ -31,12 +31,13 @@
 $ pnpm install
 ```
 
-`postinstall` runs `prisma generate`, so the client under `src/database/generated`
-(git-ignored) is built for you. Then copy the environment file and apply migrations:
+Copy the environment file, create the schema, and seed it. `db:push` applies the
+Drizzle schema (`src/database/schema`) straight to the database; for versioned
+migrations use `db:generate` then `db:migrate` instead.
 
 ```bash
 $ cp .env.example .env
-$ pnpm run db:migrate
+$ pnpm run db:push
 $ pnpm run db:seed
 ```
 

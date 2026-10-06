@@ -13,7 +13,7 @@ import { PERMISSIONS_KEY, type PermissionsMetadata } from "@/common/decorators/r
 import { IS_PUBLIC_KEY } from "@/common/decorators/public.decorator.js";
 import type { AuthenticatedUser } from "@/common/types/authenticated-request.type.js";
 import type { AccessTokenPayload } from "@/modules/auth/tokens.service.js";
-import { UserStatus } from "@/database/generated/prisma/enums.js";
+import { UserStatus } from "@/database/schema/enums.js";
 import { PermissionsService } from "@/modules/authorization/permissions.service.js";
 
 /**

@@ -1,5 +1,5 @@
 import type { PermissionKey } from "@/common/authorization/permissions.constant.js";
-import type { UserStatus } from "@/database/generated/prisma/enums.js";
+import type { UserStatus } from "@/database/schema/enums.js";
 
 /** Everything the guard needs to authorize a request, resolved from the database. */
 export interface ResolvedPrincipal {

@@ -12,9 +12,9 @@ export const paginationSchema = z.object({
 
 export type PaginationParams = z.infer<typeof paginationSchema>;
 
-/** Converts a 1-indexed page/limit into Prisma's `skip`/`take`. */
-export function toSkipTake({ page, limit }: PaginationParams): { skip: number; take: number } {
-    return { skip: (page - 1) * limit, take: limit };
+/** Converts a 1-indexed page/limit into the `limit`/`offset` pair a query takes. */
+export function toLimitOffset({ page, limit }: PaginationParams): { limit: number; offset: number } {
+    return { limit, offset: (page - 1) * limit };
 }
 
 export function buildPaginationMeta({ page, limit }: PaginationParams, total: number): PaginationMeta {

@@ -1,16 +1,19 @@
-import { BadRequestException, Injectable } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { generateSecret, generateURI, verifySync } from "otplib";
 import * as QRCode from "qrcode";
 import { decrypt, encrypt } from "@/common/utils/encryption.util.js";
 import { generateRecoveryCodes, hashToken } from "@/common/utils/token.util.js";
 import type { Env } from "@/config/env.schema.js";
-import { PrismaService } from "@/database/prisma.service.js";
+import { InjectDrizzle } from "@nestjs/drizzle";
+import { and, eq, isNull, lt, or } from "drizzle-orm";
+import type { Database } from "@/database/database.type.js";
+import { users } from "@/database/schema/users.js";
 
 @Injectable()
 export class TwoFactorService {
     constructor(
-        private readonly prisma: PrismaService,
+        @InjectDrizzle() private readonly db: Database,
         private readonly configService: ConfigService<Env, true>,
     ) {}
 
@@ -28,10 +31,10 @@ export class TwoFactorService {
             secret,
         });
 
-        await this.prisma.user.update({
-            where: { id: userId },
-            data: { twoFactorSecret: encrypt(secret, this.getEncryptionKey()) },
-        });
+        await this.db
+            .update(users)
+            .set({ twoFactorSecret: encrypt(secret, this.getEncryptionKey()) })
+            .where(eq(users.id, userId));
 
         const qrCodeDataUrl = await QRCode.toDataURL(otpauthUrl);
         return { otpauthUrl, qrCodeDataUrl };
@@ -39,7 +42,7 @@ export class TwoFactorService {
 
     /** Confirms the pending secret with a live code, turns 2FA on, and issues recovery codes (shown once). */
     async enable(userId: string, code: string): Promise<{ recoveryCodes: string[] }> {
-        const user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId } });
+        const user = await this.findUserOrThrow(userId);
         if (!user.twoFactorSecret) {
             throw new BadRequestException("Call the 2FA setup endpoint first");
         }
@@ -50,24 +53,24 @@ export class TwoFactorService {
         }
 
         const recoveryCodes = generateRecoveryCodes();
-        await this.prisma.user.update({
-            where: { id: userId },
-            data: {
+        await this.db
+            .update(users)
+            .set({
                 twoFactorEnabled: true,
                 twoFactorRecoveryCodes: recoveryCodes.map(hashToken),
                 // Spend the enrolling code too, so it cannot immediately be replayed at login.
                 twoFactorLastUsedStep: currentTimeStep(),
-            },
-        });
+            })
+            .where(eq(users.id, userId));
 
         return { recoveryCodes };
     }
 
     async disable(userId: string): Promise<void> {
-        await this.prisma.user.update({
-            where: { id: userId },
-            data: { twoFactorEnabled: false, twoFactorSecret: null, twoFactorRecoveryCodes: [] },
-        });
+        await this.db
+            .update(users)
+            .set({ twoFactorEnabled: false, twoFactorSecret: null, twoFactorRecoveryCodes: [] })
+            .where(eq(users.id, userId));
     }
 
     /**
@@ -77,7 +80,7 @@ export class TwoFactorService {
      * makes two simultaneous attempts with the same code resolve to one winner.
      */
     async verifyCode(userId: string, code: string): Promise<boolean> {
-        const user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId } });
+        const user = await this.findUserOrThrow(userId);
         if (!user.twoFactorSecret) {
             return false;
         }
@@ -88,31 +91,44 @@ export class TwoFactorService {
         }
 
         const step = currentTimeStep();
-        const { count } = await this.prisma.user.updateMany({
-            where: {
-                id: userId,
-                OR: [{ twoFactorLastUsedStep: null }, { twoFactorLastUsedStep: { lt: step } }],
-            },
-            data: { twoFactorLastUsedStep: step },
-        });
+        const accepted = await this.db
+            .update(users)
+            .set({ twoFactorLastUsedStep: step })
+            .where(
+                and(
+                    eq(users.id, userId),
+                    or(isNull(users.twoFactorLastUsedStep), lt(users.twoFactorLastUsedStep, step)),
+                ),
+            )
+            .returning({ id: users.id });
 
-        return count > 0;
+        return accepted.length > 0;
     }
 
     /** One-time use — the matched code is removed from the stored set on success. */
     async verifyRecoveryCode(userId: string, code: string): Promise<boolean> {
-        const user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId } });
+        const user = await this.findUserOrThrow(userId);
         const hash = hashToken(code.toUpperCase());
         if (!user.twoFactorRecoveryCodes.includes(hash)) {
             return false;
         }
 
-        await this.prisma.user.update({
-            where: { id: userId },
-            data: { twoFactorRecoveryCodes: user.twoFactorRecoveryCodes.filter((stored) => stored !== hash) },
-        });
+        await this.db
+            .update(users)
+            .set({ twoFactorRecoveryCodes: user.twoFactorRecoveryCodes.filter(stored => stored !== hash) })
+            .where(eq(users.id, userId));
 
         return true;
+    }
+
+    private async findUserOrThrow(userId: string) {
+        const [user] = await this.db.select().from(users).where(eq(users.id, userId)).limit(1);
+
+        if (!user) {
+            throw new NotFoundException("User not found");
+        }
+
+        return user;
     }
 
     private getEncryptionKey(): string {

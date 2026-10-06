@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createZodDto } from "nestjs-zod";
-import { Gender } from "@/database/generated/prisma/enums.js";
+import { Gender } from "@/database/schema/enums.js";
 
 /** Mirrors the `user_profiles` table: optional personal details, nested so the
  *  request body has the same shape as the response. */

@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, UnauthorizedException } from "@nestjs/common";
 import * as argon2 from "argon2";
 import { AuthService } from "@/modules/auth/auth.service.js";
-import { EmailTokenType, UserStatus } from "@/database/generated/prisma/enums.js";
+import { EmailTokenType, UserStatus } from "@/database/schema/enums.js";
 import type { UserWithRoles } from "@/modules/users/users.service.js";
 
 const CORRECT_PASSWORD = "correct-horse-battery";

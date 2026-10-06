@@ -2,8 +2,11 @@ import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { generateOtpCode, hashToken } from "@/common/utils/token.util.js";
 import type { Env } from "@/config/env.schema.js";
-import { PrismaService } from "@/database/prisma.service.js";
-import { EmailTokenType } from "@/database/generated/prisma/enums.js";
+import { InjectDrizzle } from "@nestjs/drizzle";
+import { and, eq, lt, sql } from "drizzle-orm";
+import type { Database } from "@/database/database.type.js";
+import { emailTokens } from "@/database/schema/auth.js";
+import { EmailTokenType } from "@/database/schema/enums.js";
 
 const MAX_ATTEMPTS = 5;
 const RESEND_COOLDOWN_MS = 60 * 1000;
@@ -11,7 +14,7 @@ const RESEND_COOLDOWN_MS = 60 * 1000;
 @Injectable()
 export class EmailTokensService {
     constructor(
-        private readonly prisma: PrismaService,
+        @InjectDrizzle() private readonly db: Database,
         private readonly configService: ConfigService<Env, true>,
     ) {}
 
@@ -41,33 +44,37 @@ export class EmailTokensService {
 
     /** Checks the code for this user+type, tracks failed attempts, and marks it used on success. */
     async consume(userId: string, type: EmailTokenType, code: string): Promise<boolean> {
-        const record = await this.prisma.emailToken.findUnique({ where: { userId_type: { userId, type } } });
+        const record = await this.find(userId, type);
 
         if (!record || record.usedAt || record.expiresAt < new Date() || record.attempts >= MAX_ATTEMPTS) {
             return false;
         }
 
         if (record.codeHash !== hashToken(code)) {
-            await this.prisma.emailToken.update({ where: { id: record.id }, data: { attempts: { increment: 1 } } });
+            await this.db
+                .update(emailTokens)
+                .set({ attempts: sql`${emailTokens.attempts} + 1` })
+                .where(eq(emailTokens.id, record.id));
             return false;
         }
 
-        await this.prisma.emailToken.update({ where: { id: record.id }, data: { usedAt: new Date() } });
+        await this.db.update(emailTokens).set({ usedAt: new Date() }).where(eq(emailTokens.id, record.id));
 
         return true;
     }
 
     /** Removes codes that can no longer be redeemed; returns how many were deleted. */
     async purgeExpired(): Promise<number> {
-        const { count } = await this.prisma.emailToken.deleteMany({
-            where: { expiresAt: { lt: new Date() } },
-        });
+        const deleted = await this.db
+            .delete(emailTokens)
+            .where(lt(emailTokens.expiresAt, new Date()))
+            .returning({ id: emailTokens.id });
 
-        return count;
+        return deleted.length;
     }
 
     private async issue(userId: string, type: EmailTokenType, ttlMs: number): Promise<string | null> {
-        const existing = await this.prisma.emailToken.findUnique({ where: { userId_type: { userId, type } } });
+        const existing = await this.find(userId, type);
         const isActiveAndFresh =
             existing &&
             !existing.usedAt &&
@@ -80,12 +87,24 @@ export class EmailTokensService {
         const { code, codeHash } = generateOtpCode();
         const expiresAt = new Date(Date.now() + ttlMs);
 
-        await this.prisma.emailToken.upsert({
-            where: { userId_type: { userId, type } },
-            create: { userId, type, codeHash, expiresAt },
-            update: { codeHash, expiresAt, usedAt: null, attempts: 0 },
-        });
+        await this.db
+            .insert(emailTokens)
+            .values({ userId, type, codeHash, expiresAt })
+            .onConflictDoUpdate({
+                target: [emailTokens.userId, emailTokens.type],
+                set: { codeHash, expiresAt, usedAt: null, attempts: 0 },
+            });
 
         return code;
+    }
+
+    private async find(userId: string, type: EmailTokenType) {
+        const [token] = await this.db
+            .select()
+            .from(emailTokens)
+            .where(and(eq(emailTokens.userId, userId), eq(emailTokens.type, type)))
+            .limit(1);
+
+        return token;
     }
 }

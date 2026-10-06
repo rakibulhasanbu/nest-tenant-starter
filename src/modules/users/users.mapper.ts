@@ -1,15 +1,15 @@
-import type { UserModel, UserProfileModel } from "@/database/generated/prisma/models.js";
+import type { User, UserProfile } from "@/database/schema/users.js";
 import type { PermissionKey } from "@/common/authorization/permissions.constant.js";
 import type { AuthenticatedUser } from "@/common/types/authenticated-request.type.js";
 import type { UserWithRoles } from "@/modules/users/users.service.js";
 
-export type PublicUserProfile = Pick<UserProfileModel, "gender" | "bio"> & {
+export type PublicUserProfile = Pick<UserProfile, "gender" | "bio"> & {
     /** Calendar date (YYYY-MM-DD) — it is stored as a `DATE`, so never expose a timestamp. */
     dateOfBirth: string | null;
 };
 
 export type PublicUser = Omit<
-    UserModel,
+    User,
     "password" | "twoFactorSecret" | "twoFactorRecoveryCodes" | "twoFactorLastUsedStep"
 > & {
     roleIds: string[];
@@ -67,9 +67,9 @@ export function toPublicUser(user: UserWithRoles): PublicUser {
     };
 }
 
-function toPublicUserProfile(profile: UserProfileModel): PublicUserProfile {
+function toPublicUserProfile(profile: UserProfile): PublicUserProfile {
     return {
-        dateOfBirth: profile.dateOfBirth?.toISOString().slice(0, 10) ?? null,
+        dateOfBirth: profile.dateOfBirth,
         gender: profile.gender,
         bio: profile.bio,
     };

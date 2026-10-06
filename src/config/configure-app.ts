@@ -30,7 +30,7 @@ export function configureApp(app: NestExpressApplication): NestExpressApplicatio
 
     app.useGlobalFilters(new AllExceptionsFilter());
     app.useGlobalInterceptors(new TransformResponseInterceptor());
-    // Without this, SIGTERM skips onModuleDestroy: Prisma and Redis connections
+    // Without this, SIGTERM skips onModuleDestroy: Database and Redis connections
     // are left hanging and in-flight requests are cut mid-response on every deploy.
     app.enableShutdownHooks();
 

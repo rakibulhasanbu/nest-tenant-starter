@@ -1,11 +1,12 @@
 import { Injectable } from "@nestjs/common";
 import type { PermissionKey } from "@/common/authorization/permissions.constant.js";
-import type { Prisma } from "@/database/generated/prisma/client.js";
-import { PrismaService } from "@/database/prisma.service.js";
+import { InjectDrizzle } from "@nestjs/drizzle";
+import { and, eq, inArray, notInArray, sql } from "drizzle-orm";
+import type { Database, DbClient } from "@/database/database.type.js";
+import { userRoles } from "@/database/schema/authorization.js";
+import { users } from "@/database/schema/users.js";
 import { PermissionsCacheService } from "@/modules/authorization/permissions-cache.service.js";
 import type { ResolvedPrincipal } from "@/modules/authorization/resolved-principal.type.js";
-
-type PrismaClientLike = PrismaService | Prisma.TransactionClient;
 
 /**
  * Turns a user id into the permission set the guard authorizes against.
@@ -18,7 +19,7 @@ type PrismaClientLike = PrismaService | Prisma.TransactionClient;
 @Injectable()
 export class PermissionsService {
     constructor(
-        private readonly prisma: PrismaService,
+        @InjectDrizzle() private readonly db: Database,
         private readonly cache: PermissionsCacheService,
     ) {}
 
@@ -54,79 +55,76 @@ export class PermissionsService {
      * picks up their new permissions. Pass `tx` when the role change itself is
      * transactional, so the version can never advance without the change landing.
      */
-    async bumpPermVersion(userId: string, tx?: Prisma.TransactionClient): Promise<void> {
-        await (tx ?? this.prisma).user.update({
-            where: { id: userId },
-            data: { permVersion: { increment: 1 } },
-        });
+    async bumpPermVersion(userId: string, tx?: DbClient): Promise<void> {
+        await (tx ?? this.db)
+            .update(users)
+            .set({ permVersion: sql`${users.permVersion} + 1` })
+            .where(eq(users.id, userId));
         await this.cache.invalidate(userId);
     }
 
     async bumpPermVersionForRole(roleId: string): Promise<void> {
-        const assignments = await this.prisma.userRole.findMany({
-            where: { roleId },
-            select: { userId: true },
-        });
+        const assignments = await this.db
+            .select({ userId: userRoles.userId })
+            .from(userRoles)
+            .where(eq(userRoles.roleId, roleId));
         const userIds = assignments.map(assignment => assignment.userId);
 
         if (userIds.length === 0) {
             return;
         }
 
-        await this.prisma.user.updateMany({
-            where: { id: { in: userIds } },
-            data: { permVersion: { increment: 1 } },
-        });
+        await this.db
+            .update(users)
+            .set({ permVersion: sql`${users.permVersion} + 1` })
+            .where(inArray(users.id, userIds));
         await this.cache.invalidateMany(userIds);
     }
 
     /** Kills every existing session outright — for password changes and global logout. */
-    async bumpTokenVersion(userId: string, tx?: Prisma.TransactionClient): Promise<void> {
-        await (tx ?? this.prisma).user.update({
-            where: { id: userId },
-            data: { tokenVersion: { increment: 1 } },
-        });
+    async bumpTokenVersion(userId: string, tx?: DbClient): Promise<void> {
+        await (tx ?? this.db)
+            .update(users)
+            .set({ tokenVersion: sql`${users.tokenVersion} + 1` })
+            .where(eq(users.id, userId));
         await this.cache.invalidate(userId);
     }
 
     async assignRoles(userId: string, roleIds: string[], assignedBy: string): Promise<void> {
-        await this.prisma.$transaction(async tx => {
-            await tx.userRole.deleteMany({ where: { userId, roleId: { notIn: roleIds } } });
-            await tx.userRole.createMany({
-                data: roleIds.map(roleId => ({ userId, roleId, assignedBy })),
-                skipDuplicates: true,
-            });
-            await tx.user.update({ where: { id: userId }, data: { permVersion: { increment: 1 } } });
+        await this.db.transaction(async tx => {
+            await tx.delete(userRoles).where(and(eq(userRoles.userId, userId), notInArray(userRoles.roleId, roleIds)));
+            await tx
+                .insert(userRoles)
+                .values(roleIds.map(roleId => ({ userId, roleId, assignedBy })))
+                .onConflictDoNothing();
+            await tx
+                .update(users)
+                .set({ permVersion: sql`${users.permVersion} + 1` })
+                .where(eq(users.id, userId));
         });
 
         await this.cache.invalidate(userId);
     }
 
     /** Grants the baseline role to a freshly created account. Runs inside the caller's transaction when given one. */
-    async assignRolesOnCreate(userId: string, roleIds: string[], client: PrismaClientLike): Promise<void> {
-        await client.userRole.createMany({
-            data: roleIds.map(roleId => ({ userId, roleId })),
-            skipDuplicates: true,
-        });
+    async assignRolesOnCreate(userId: string, roleIds: string[], client: DbClient): Promise<void> {
+        await client
+            .insert(userRoles)
+            .values(roleIds.map(roleId => ({ userId, roleId })))
+            .onConflictDoNothing();
     }
 
     private async readFromDatabase(userId: string): Promise<ResolvedPrincipal | null> {
-        const user = await this.prisma.user.findUnique({
+        const user = await this.db.query.users.findFirst({
             where: { id: userId },
-            select: {
-                id: true,
-                status: true,
-                deletedAt: true,
-                permVersion: true,
-                tokenVersion: true,
+            columns: { id: true, status: true, deletedAt: true, permVersion: true, tokenVersion: true },
+            with: {
                 roles: {
-                    select: {
+                    columns: {},
+                    with: {
                         role: {
-                            select: {
-                                id: true,
-                                rank: true,
-                                permissions: { select: { permissionKey: true } },
-                            },
+                            columns: { id: true, rank: true },
+                            with: { permissions: { columns: { permissionKey: true } } },
                         },
                     },
                 },

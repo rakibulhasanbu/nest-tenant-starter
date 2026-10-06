@@ -1,11 +1,13 @@
 import { Module } from "@nestjs/common";
 import { APP_GUARD, APP_PIPE } from "@nestjs/core";
-import { ConfigModule } from "@nestjs/config";
+import { ConfigModule, ConfigService } from "@nestjs/config";
 import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
 import { ScheduleModule } from "@nestjs/schedule";
 import { ZodValidationPipe } from "nestjs-zod";
-import { validateEnv } from "@/config/env.schema.js";
-import { PrismaModule } from "@/database/prisma.module.js";
+import { validateEnv, type Env } from "@/config/env.schema.js";
+import { DrizzleModule } from "@nestjs/drizzle";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { relations } from "@/database/schema/relations.js";
 import { RedisModule } from "@/integrations/redis/redis.module.js";
 import { RedisService } from "@/integrations/redis/redis.service.js";
 import { RedisThrottlerStorage } from "@/integrations/redis/redis-throttler.storage.js";
@@ -33,7 +35,14 @@ import { PermissionsGuard } from "@/common/guards/permissions.guard.js";
             }),
         }),
         ScheduleModule.forRoot(),
-        PrismaModule,
+        DrizzleModule.forRootAsync({
+            inject: [ConfigService],
+            useFactory: (config: ConfigService<Env, true>) => ({
+                drizzle,
+                connection: config.get("DATABASE_URL", { infer: true }),
+                relations,
+            }),
+        }),
         RedisModule,
         AuthorizationModule,
         HealthModule,

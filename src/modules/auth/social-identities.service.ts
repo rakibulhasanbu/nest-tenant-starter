@@ -1,27 +1,39 @@
 import { Injectable } from "@nestjs/common";
-import { PrismaService } from "@/database/prisma.service.js";
-import type { AuthProvider } from "@/database/generated/prisma/enums.js";
+import { InjectDrizzle } from "@nestjs/drizzle";
+import { and, eq } from "drizzle-orm";
+import type { Database } from "@/database/database.type.js";
+import { socialIdentities } from "@/database/schema/auth.js";
+import type { AuthProvider } from "@/database/schema/enums.js";
 
 @Injectable()
 export class SocialIdentitiesService {
-    constructor(private readonly prisma: PrismaService) {}
+    constructor(@InjectDrizzle() private readonly db: Database) {}
 
-    findByProviderAccount(provider: AuthProvider, providerAccountId: string) {
-        return this.prisma.socialIdentity.findUnique({
-            where: { provider_providerAccountId: { provider, providerAccountId } },
-            include: { user: true },
-        });
+    async findByProviderAccount(provider: AuthProvider, providerAccountId: string) {
+        return (
+            (await this.db.query.socialIdentities.findFirst({
+                where: { provider, providerAccountId },
+                with: { user: true },
+            })) ?? null
+        );
     }
 
-    findByUserAndProvider(userId: string, provider: AuthProvider) {
-        return this.prisma.socialIdentity.findUnique({
-            where: { userId_provider: { userId, provider } },
-        });
+    async findByUserAndProvider(userId: string, provider: AuthProvider) {
+        const [identity] = await this.db
+            .select()
+            .from(socialIdentities)
+            .where(and(eq(socialIdentities.userId, userId), eq(socialIdentities.provider, provider)))
+            .limit(1);
+
+        return identity ?? null;
     }
 
-    link(userId: string, provider: AuthProvider, providerAccountId: string, email: string) {
-        return this.prisma.socialIdentity.create({
-            data: { userId, provider, providerAccountId, email },
-        });
+    async link(userId: string, provider: AuthProvider, providerAccountId: string, email: string) {
+        const [identity] = await this.db
+            .insert(socialIdentities)
+            .values({ userId, provider, providerAccountId, email })
+            .returning();
+
+        return identity!;
     }
 }

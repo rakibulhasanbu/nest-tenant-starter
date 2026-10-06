@@ -2,7 +2,7 @@ import { ArgumentsHost, HttpException, HttpStatus, Logger, NotFoundException } f
 import { ZodValidationException } from "nestjs-zod";
 import { z } from "zod";
 import { AllExceptionsFilter } from "@/common/filters/all-exceptions.filter.js";
-import { Prisma } from "@/database/generated/prisma/client.js";
+import { DrizzleQueryError } from "drizzle-orm";
 
 function createHost() {
     const json = vi.fn();
@@ -78,15 +78,12 @@ describe("AllExceptionsFilter", () => {
 
     it("translates a unique-constraint violation into a 409 naming the field", () => {
         const { host, body } = createHost();
+        const cause = Object.assign(new Error("duplicate key"), {
+            code: "23505",
+            detail: "Key (email)=(a@b.c) already exists.",
+        });
 
-        filter.catch(
-            new Prisma.PrismaClientKnownRequestError("dup", {
-                code: "P2002",
-                clientVersion: "7.10.0",
-                meta: { target: ["email"] },
-            }),
-            host,
-        );
+        filter.catch(new DrizzleQueryError("insert into users", [], cause), host);
 
         expect(body()).toMatchObject({
             statusCode: HttpStatus.CONFLICT,
@@ -95,19 +92,15 @@ describe("AllExceptionsFilter", () => {
         });
     });
 
-    it("maps a missing record to 404 and an unknown Prisma code to a generic 500", () => {
-        const notFound = createHost();
-        filter.catch(
-            new Prisma.PrismaClientKnownRequestError("missing", { code: "P2025", clientVersion: "7.10.0" }),
-            notFound.host,
-        );
-        expect(notFound.body()).toMatchObject({ statusCode: 404, code: "NOT_FOUND" });
+    it("maps a foreign-key violation to 400 and an unknown database error to a generic 500", () => {
+        const foreignKey = createHost();
+        const fkCause = Object.assign(new Error("fk"), { code: "23503" });
+        filter.catch(new DrizzleQueryError("insert into user_roles", [], fkCause), foreignKey.host);
+        expect(foreignKey.body()).toMatchObject({ statusCode: 400, code: "FOREIGN_KEY_CONSTRAINT_VIOLATION" });
 
         const unknown = createHost();
-        filter.catch(
-            new Prisma.PrismaClientKnownRequestError("???", { code: "P9999", clientVersion: "7.10.0" }),
-            unknown.host,
-        );
+        const otherCause = Object.assign(new Error("???"), { code: "XX000" });
+        filter.catch(new DrizzleQueryError("select 1", [], otherCause), unknown.host);
         expect(unknown.body()).toMatchObject({ statusCode: 500, code: "INTERNAL_SERVER_ERROR" });
     });
 

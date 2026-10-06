@@ -31,9 +31,9 @@ if ! redis-cli ping >/dev/null 2>&1; then
   until redis-cli ping >/dev/null 2>&1; do sleep 1; done
 fi
 
-# Dependencies (postinstall runs prisma generate)
+# Dependencies
 pnpm install
 
 # Schema + seed data (seed is upsert-based, safe to re-run)
-pnpm db:migrate:deploy
+pnpm db:push --force
 pnpm db:seed

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createZodDto } from "nestjs-zod";
-import { UserStatus } from "@/database/generated/prisma/enums.js";
+import { UserStatus } from "@/database/schema/enums.js";
 import { paginationSchema } from "@/common/utils/pagination.util.js";
 
 export const listUsersSchema = z.strictObject({

@@ -8,8 +8,12 @@ import { AppModule } from "@/app.module.js";
 import { PERMISSIONS } from "@/common/authorization/permissions.constant.js";
 import { SYSTEM_ROLE_IDS } from "@/common/authorization/system-roles.constant.js";
 import { configureApp } from "@/config/configure-app.js";
-import { UserStatus } from "@/database/generated/prisma/enums.js";
-import { PrismaService } from "@/database/prisma.service.js";
+import { UserStatus } from "@/database/schema/enums.js";
+import { getDrizzleToken } from "@nestjs/drizzle";
+import { eq, like } from "drizzle-orm";
+import type { Database } from "@/database/database.type.js";
+import { roles, rolePermissions } from "@/database/schema/authorization.js";
+import { users as usersTable } from "@/database/schema/users.js";
 import { RedisService } from "@/integrations/redis/redis.service.js";
 import { EmailTokensService } from "@/modules/auth/email-tokens.service.js";
 import { UsersService } from "@/modules/users/users.service.js";
@@ -37,7 +41,7 @@ const ROLE_PREFIX = "e2e-role-";
  */
 describe("Auth and admin flows (e2e)", () => {
     let app: NestExpressApplication;
-    let prisma: PrismaService;
+    let db: Database;
     let users: UsersService;
     let emailTokens: EmailTokensService;
     let redis: RedisService;
@@ -50,7 +54,7 @@ describe("Auth and admin flows (e2e)", () => {
         app = configureApp(moduleFixture.createNestApplication<NestExpressApplication>());
         await app.init();
 
-        prisma = app.get(PrismaService);
+        db = app.get<Database>(getDrizzleToken());
         users = app.get(UsersService);
         emailTokens = app.get(EmailTokensService);
         redis = app.get(RedisService);
@@ -68,8 +72,8 @@ describe("Auth and admin flows (e2e)", () => {
 
     afterAll(async () => {
         // Users first: a role cannot be deleted while it is still assigned.
-        await prisma?.user.deleteMany({ where: { email: { startsWith: EMAIL_PREFIX } } });
-        await prisma?.role.deleteMany({ where: { id: { startsWith: ROLE_PREFIX } } });
+        await db?.delete(usersTable).where(like(usersTable.email, `${EMAIL_PREFIX}%`));
+        await db?.delete(roles).where(like(roles.id, `${ROLE_PREFIX}%`));
         await app?.close();
     });
 
@@ -191,7 +195,7 @@ describe("Auth and admin flows (e2e)", () => {
 
             // Stand in for a Google-only account: those never get a
             // password, and signing in as one is impossible by definition.
-            await prisma.user.update({ where: { id }, data: { password: null } });
+            await db.update(usersTable).set({ password: null }).where(eq(usersTable.id, id));
 
             const before = await authed("get", "/users/me", accessToken).expect(200);
             expect(before.body.data.hasPassword).toBe(false);
@@ -209,7 +213,7 @@ describe("Auth and admin flows (e2e)", () => {
     describe("account reactivation", () => {
         it("answers a deleted account's sign-in with a 409 that carries the deadline", async () => {
             const { id, email } = await createUser();
-            await prisma.user.update({ where: { id }, data: { deletedAt: new Date() } });
+            await db.update(usersTable).set({ deletedAt: new Date() }).where(eq(usersTable.id, id));
 
             const response = await request(app.getHttpServer())
                 .post(`${API}/auth/signin`)
@@ -225,7 +229,7 @@ describe("Auth and admin flows (e2e)", () => {
 
         it("restores the account once the emailed code is consumed", async () => {
             const { id, email } = await createUser();
-            await prisma.user.update({ where: { id }, data: { deletedAt: new Date() } });
+            await db.update(usersTable).set({ deletedAt: new Date() }).where(eq(usersTable.id, id));
 
             // The code only exists hashed in the database, so the test issues its
             // own rather than trying to read back the one the 409 mails out.
@@ -233,13 +237,13 @@ describe("Auth and admin flows (e2e)", () => {
 
             await request(app.getHttpServer()).post(`${API}/auth/reactivate-account`).send({ email, code }).expect(204);
 
-            expect(await prisma.user.findUnique({ where: { id } })).toMatchObject({ deletedAt: null });
+            expect(await db.query.users.findFirst({ where: { id } })).toMatchObject({ deletedAt: null });
             await signIn(email);
         });
 
         it("rejects a wrong code without saying why", async () => {
             const { id, email } = await createUser();
-            await prisma.user.update({ where: { id }, data: { deletedAt: new Date() } });
+            await db.update(usersTable).set({ deletedAt: new Date() }).where(eq(usersTable.id, id));
             await emailTokens.issueReactivateAccountToken(id);
 
             await request(app.getHttpServer())
@@ -253,21 +257,17 @@ describe("Auth and admin flows (e2e)", () => {
         /** A runtime role, as the RBAC UI creates them — the seeded `admin` cannot invite. */
         const createInviterRole = async () => {
             const id = `${ROLE_PREFIX}${randomUUID()}`;
-            await prisma.role.create({
-                data: {
-                    id,
-                    name: "E2E Inviter",
-                    rank: 60,
-                    permissions: {
-                        create: [
-                            { permissionKey: PERMISSIONS.USER_INVITE },
-                            { permissionKey: PERMISSIONS.USER_READ_ANY },
-                            { permissionKey: PERMISSIONS.ROLE_READ },
-                            { permissionKey: PERMISSIONS.ROLE_ASSIGN },
-                        ],
-                    },
-                },
-            });
+            await db.insert(roles).values({ id, name: "E2E Inviter", rank: 60 });
+            await db
+                .insert(rolePermissions)
+                .values(
+                    [
+                        PERMISSIONS.USER_INVITE,
+                        PERMISSIONS.USER_READ_ANY,
+                        PERMISSIONS.ROLE_READ,
+                        PERMISSIONS.ROLE_ASSIGN,
+                    ].map(permissionKey => ({ roleId: id, permissionKey })),
+                );
 
             return id;
         };

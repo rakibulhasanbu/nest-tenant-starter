@@ -1,9 +1,9 @@
-import { buildPaginationMeta, paginate, toSkipTake } from "@/common/utils/pagination.util.js";
+import { buildPaginationMeta, paginate, toLimitOffset } from "@/common/utils/pagination.util.js";
 
-describe("toSkipTake", () => {
-    it("computes skip from page and limit", () => {
-        expect(toSkipTake({ page: 1, limit: 20 })).toEqual({ skip: 0, take: 20 });
-        expect(toSkipTake({ page: 3, limit: 10 })).toEqual({ skip: 20, take: 10 });
+describe("toLimitOffset", () => {
+    it("computes offset from page and limit", () => {
+        expect(toLimitOffset({ page: 1, limit: 20 })).toEqual({ limit: 20, offset: 0 });
+        expect(toLimitOffset({ page: 3, limit: 10 })).toEqual({ limit: 10, offset: 20 });
     });
 });
 

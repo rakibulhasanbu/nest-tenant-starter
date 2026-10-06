@@ -4,7 +4,7 @@ import * as argon2 from "argon2";
 import { randomUUID } from "node:crypto";
 import { resolveDeviceInfo } from "@/common/utils/device.util.js";
 import type { Env } from "@/config/env.schema.js";
-import { AuthProvider, EmailTokenType, UserStatus } from "@/database/generated/prisma/enums.js";
+import { AuthProvider, EmailTokenType, UserStatus } from "@/database/schema/enums.js";
 import { EMAIL_SENDER, type EmailSender } from "@/integrations/email/email-sender.interface.js";
 import { EmailTokensService } from "@/modules/auth/email-tokens.service.js";
 import { GoogleAuthService } from "@/modules/auth/google-auth.service.js";

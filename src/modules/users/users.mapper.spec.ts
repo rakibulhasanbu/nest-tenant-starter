@@ -34,7 +34,7 @@ describe("toPublicUser", () => {
         const publicUser = toPublicUser(
             buildUser({
                 profile: {
-                    dateOfBirth: new Date("1995-03-14T00:00:00.000Z"),
+                    dateOfBirth: "1995-03-14",
                     gender: "MALE",
                     bio: "hi",
                 },

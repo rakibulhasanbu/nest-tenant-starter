@@ -1,4 +1,4 @@
-Use Prisma version 7
+Use Drizzle ORM (v1) with `@nestjs/drizzle` and node-postgres. Inject the database with `@InjectDrizzle() private readonly db: Database` (type from `@/database/database.type.js`); schema lives in `src/database/schema/`.
 
 use absolute path please
 

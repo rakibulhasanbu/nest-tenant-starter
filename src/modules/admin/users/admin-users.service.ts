@@ -1,7 +1,10 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { SYSTEM_ROLE_IDS } from "@/common/authorization/system-roles.constant.js";
 import type { AuthenticatedUser } from "@/common/types/authenticated-request.type.js";
-import { PrismaService } from "@/database/prisma.service.js";
+import { InjectDrizzle } from "@nestjs/drizzle";
+import { inArray, max } from "drizzle-orm";
+import type { Database } from "@/database/database.type.js";
+import { roles as rolesTable } from "@/database/schema/authorization.js";
 import { AuthService } from "@/modules/auth/auth.service.js";
 import { TokensService } from "@/modules/auth/tokens.service.js";
 import { PermissionsService } from "@/modules/authorization/permissions.service.js";
@@ -16,7 +19,7 @@ import { paginate } from "@/common/utils/pagination.util.js";
 @Injectable()
 export class AdminUsersService {
     constructor(
-        private readonly prisma: PrismaService,
+        @InjectDrizzle() private readonly db: Database,
         private readonly usersService: UsersService,
         private readonly tokensService: TokensService,
         private readonly authService: AuthService,
@@ -72,7 +75,7 @@ export class AdminUsersService {
         }
 
         const roleIds = [...new Set([SYSTEM_ROLE_IDS.USER, ...data.roleIds])];
-        const roles = await this.prisma.role.findMany({ where: { id: { in: roleIds } } });
+        const roles = await this.db.select().from(rolesTable).where(inArray(rolesTable.id, roleIds));
 
         if (roles.length !== roleIds.length) {
             throw new BadRequestException("One or more roles do not exist");
@@ -142,7 +145,7 @@ export class AdminUsersService {
 
     async invite(actor: AuthenticatedUser, data: InviteUserInput) {
         const roleIds = [...new Set([SYSTEM_ROLE_IDS.USER, ...data.roleIds])];
-        const roles = await this.prisma.role.findMany({ where: { id: { in: roleIds } } });
+        const roles = await this.db.select().from(rolesTable).where(inArray(rolesTable.id, roleIds));
 
         if (roles.length !== roleIds.length) {
             throw new BadRequestException("One or more roles do not exist");
@@ -185,11 +188,16 @@ export class AdminUsersService {
             return 0;
         }
 
-        const aggregate = await this.prisma.role.aggregate({
-            where: { id: { in: user.roles.map(({ roleId }) => roleId) } },
-            _max: { rank: true },
-        });
+        const [aggregate] = await this.db
+            .select({ rank: max(rolesTable.rank) })
+            .from(rolesTable)
+            .where(
+                inArray(
+                    rolesTable.id,
+                    user.roles.map(({ roleId }) => roleId),
+                ),
+            );
 
-        return aggregate._max.rank ?? 0;
+        return aggregate?.rank ?? 0;
     }
 }

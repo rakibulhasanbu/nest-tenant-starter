@@ -1,14 +1,7 @@
-import {
-    ArgumentsHost,
-    Catch,
-    ExceptionFilter,
-    HttpException,
-    HttpStatus,
-    Logger,
-} from "@nestjs/common";
+import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus, Logger } from "@nestjs/common";
 import { Request, Response } from "express";
 import { ZodValidationException } from "nestjs-zod";
-import { Prisma } from "@/database/generated/prisma/client.js";
+import { DrizzleQueryError } from "drizzle-orm";
 import type { ApiErrorResponse } from "@/common/types/api-response.type.js";
 
 @Catch()
@@ -47,15 +40,15 @@ export class AllExceptionsFilter implements ExceptionFilter {
                 statusCode: HttpStatus.BAD_REQUEST,
                 code: "VALIDATION_ERROR",
                 message: issues[0]?.message ?? "Validation failed",
-                details: issues.map((issue) => ({
+                details: issues.map(issue => ({
                     field: issue.path.join("."),
                     message: issue.message,
                 })),
             };
         }
 
-        if (exception instanceof Prisma.PrismaClientKnownRequestError) {
-            return this.buildPrismaErrorBody(exception);
+        if (exception instanceof DrizzleQueryError) {
+            return this.buildDatabaseErrorBody(exception);
         }
 
         if (exception instanceof HttpException) {
@@ -86,26 +79,23 @@ export class AllExceptionsFilter implements ExceptionFilter {
     }
 
     /**
-     * Prisma's errors are not HttpExceptions, so without this a taken username or
+     * Driver errors are not HttpExceptions, so without this a taken username or
      * a duplicate email surfaced as a 500 that told the client nothing. Only the
-     * constraint violations a caller can actually act on are translated; anything
-     * else stays a generic 500 rather than leaking schema internals.
+     * constraint violations a caller can actually act on are translated (by
+     * Postgres SQLSTATE); anything else stays a generic 500 rather than leaking
+     * schema internals.
      */
-    private buildPrismaErrorBody(exception: Prisma.PrismaClientKnownRequestError): ApiErrorResponse {
-        switch (exception.code) {
-            case "P2002":
+    private buildDatabaseErrorBody(exception: DrizzleQueryError): ApiErrorResponse {
+        const cause = exception.cause as { code?: string; detail?: string } | undefined;
+
+        switch (cause?.code) {
+            case PG_UNIQUE_VIOLATION:
                 return {
                     statusCode: HttpStatus.CONFLICT,
                     code: "UNIQUE_CONSTRAINT_VIOLATION",
-                    message: describeUniqueTarget(exception.meta?.target),
+                    message: describeUniqueTarget(cause.detail),
                 };
-            case "P2025":
-                return {
-                    statusCode: HttpStatus.NOT_FOUND,
-                    code: "NOT_FOUND",
-                    message: "The requested record no longer exists",
-                };
-            case "P2003":
+            case PG_FOREIGN_KEY_VIOLATION:
                 return {
                     statusCode: HttpStatus.BAD_REQUEST,
                     code: "FOREIGN_KEY_CONSTRAINT_VIOLATION",
@@ -121,6 +111,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
     }
 }
 
+const PG_UNIQUE_VIOLATION = "23505";
+const PG_FOREIGN_KEY_VIOLATION = "23503";
+
 /**
  * Keys that describe the envelope rather than the error, so they are rebuilt
  * from the exception itself rather than copied through. `status` is in here
@@ -132,9 +125,9 @@ function extractErrorContext(response: Record<string, unknown>): Record<string, 
     return Object.fromEntries(Object.entries(response).filter(([key]) => !RESERVED_ERROR_KEYS.has(key)));
 }
 
-/** `meta.target` carries the offending column(s) — a string or an array, depending on the driver. */
-function describeUniqueTarget(target: unknown): string {
-    const fields = Array.isArray(target) ? target.map(String) : typeof target === "string" ? [target] : [];
+/** Postgres reports the offending columns in `detail`, e.g. `Key (email)=(a@b.c) already exists.` */
+function describeUniqueTarget(detail: string | undefined): string {
+    const fields = detail?.match(/^Key \((.+?)\)=/)?.[1]?.split(", ") ?? [];
 
     return fields.length > 0
         ? `A record with this ${fields.join(", ")} already exists`

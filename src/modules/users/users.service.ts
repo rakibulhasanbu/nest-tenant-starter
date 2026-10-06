@@ -1,21 +1,24 @@
-import { Injectable } from "@nestjs/common";
-import { PrismaService } from "@/database/prisma.service.js";
-import { Gender, UserStatus } from "@/database/generated/prisma/enums.js";
+import { Injectable, NotFoundException } from "@nestjs/common";
+import { InjectDrizzle } from "@nestjs/drizzle";
+import { and, desc, eq, exists, gte, ilike, isNotNull, isNull, lt, notExists, or, sql } from "drizzle-orm";
 import { SYSTEM_ROLE_IDS } from "@/common/authorization/system-roles.constant.js";
-import type { UserModel, UserProfileModel } from "@/database/generated/prisma/models.js";
+import { toLimitOffset } from "@/common/utils/pagination.util.js";
+import type { Database } from "@/database/database.type.js";
+import { Gender, UserStatus } from "@/database/schema/enums.js";
+import { notificationPreferences, userProfiles, users, type User, type UserProfile } from "@/database/schema/users.js";
+import { roles, userRoles } from "@/database/schema/authorization.js";
 import type { UpdateNotificationPreferencesInput } from "@/modules/users/dto/update-notification-preferences.schema.js";
-import { toSkipTake } from "@/common/utils/pagination.util.js";
 
 /**
  * Role ids and the optional profile travel with every user this service returns
  * so callers never have to issue a second query to render or authorize against them.
  */
-export type UserWithRoles = UserModel & {
+export type UserWithRoles = User & {
     roles: { roleId: string }[];
-    profile: UserProfileModel | null;
+    profile: UserProfile | null;
 };
 
-const withRoles = { roles: { select: { roleId: true } }, profile: true } as const;
+const withRoles = { roles: { columns: { roleId: true } }, profile: true } as const;
 
 export interface CreateUserData {
     email: string;
@@ -49,42 +52,48 @@ export interface NotificationPreferences {
     transactionsPushNotification: boolean;
 }
 
-/** What a user without a saved row gets — must match the column defaults in schema.prisma. */
+/** What a user without a saved row gets — must match the column defaults in schema/users.ts. */
 const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
     loginEmailNotification: true,
     transactionsEmailNotification: true,
     transactionsPushNotification: true,
 };
 
-const notificationPreferencesSelect = {
-    loginEmailNotification: true,
-    transactionsEmailNotification: true,
-    transactionsPushNotification: true,
-} as const;
+const notificationPreferencesColumns = {
+    loginEmailNotification: notificationPreferences.loginEmailNotification,
+    transactionsEmailNotification: notificationPreferences.transactionsEmailNotification,
+    transactionsPushNotification: notificationPreferences.transactionsPushNotification,
+};
 
 @Injectable()
 export class UsersService {
-    constructor(private readonly prisma: PrismaService) {}
+    constructor(@InjectDrizzle() private readonly db: Database) {}
 
-    findByEmail(email: string): Promise<UserWithRoles | null> {
-        return this.prisma.user.findUnique({ where: { email }, include: withRoles });
+    async findByEmail(email: string): Promise<UserWithRoles | null> {
+        return (await this.db.query.users.findFirst({ where: { email }, with: withRoles })) ?? null;
     }
 
-    findById(id: string): Promise<UserWithRoles | null> {
-        return this.prisma.user.findUnique({ where: { id }, include: withRoles });
+    async findById(id: string): Promise<UserWithRoles | null> {
+        return (await this.db.query.users.findFirst({ where: { id }, with: withRoles })) ?? null;
     }
 
-    findByIdOrThrow(id: string): Promise<UserWithRoles> {
-        return this.prisma.user.findUniqueOrThrow({ where: { id }, include: withRoles });
+    async findByIdOrThrow(id: string): Promise<UserWithRoles> {
+        const user = await this.findById(id);
+
+        if (!user) {
+            throw new NotFoundException("User not found");
+        }
+
+        return user;
     }
 
     async findActiveById(id: string): Promise<UserWithRoles | null> {
-        const user = await this.prisma.user.findUnique({ where: { id }, include: withRoles });
+        const user = await this.findById(id);
         return user && !user.deletedAt ? user : null;
     }
 
     /**
-     * Every account gets the baseline `user` role, created in the same statement
+     * Every account gets the baseline `user` role, created in the same transaction
      * so an account can never exist without a role — a roleless user would resolve
      * to an empty permission set and silently fail every authorization check.
      */
@@ -92,19 +101,26 @@ export class UsersService {
         const username = await this.generateUniqueUsername(data.email);
         const roleIds = [...new Set([SYSTEM_ROLE_IDS.USER, ...(data.roleIds ?? [])])];
 
-        return this.prisma.user.create({
-            data: {
-                email: data.email,
-                username,
-                password: data.passwordHash,
-                name: data.name,
-                phone: data.phone,
-                status: data.status ?? UserStatus.PENDING_VERIFICATION,
-                emailVerifiedAt: data.emailVerifiedAt,
-                roles: { create: roleIds.map(roleId => ({ roleId })) },
-            },
-            include: withRoles,
+        const userId = await this.db.transaction(async tx => {
+            const [created] = await tx
+                .insert(users)
+                .values({
+                    email: data.email,
+                    username,
+                    password: data.passwordHash,
+                    name: data.name,
+                    phone: data.phone,
+                    status: data.status,
+                    emailVerifiedAt: data.emailVerifiedAt,
+                })
+                .returning({ id: users.id });
+
+            await tx.insert(userRoles).values(roleIds.map(roleId => ({ userId: created!.id, roleId })));
+
+            return created!.id;
         });
+
+        return this.findByIdOrThrow(userId);
     }
 
     /** Derives a unique handle from the email local-part, suffixing on collision. */
@@ -119,12 +135,35 @@ export class UsersService {
         let candidate = base;
         let suffix = 1;
 
-        while (await this.prisma.user.findUnique({ where: { username: candidate } })) {
+        while (await this.usernameExists(candidate)) {
             suffix += 1;
             candidate = `${base}${suffix}`;
         }
 
         return candidate;
+    }
+
+    private async usernameExists(username: string): Promise<boolean> {
+        const [row] = await this.db.select({ id: users.id }).from(users).where(eq(users.username, username)).limit(1);
+        return row !== undefined;
+    }
+
+    /**
+     * Applies `values` to one user and returns the refreshed record. `updatedAt`
+     * is always written so an update with nothing to change is still valid SQL.
+     */
+    private async updateUser(id: string, values: Partial<typeof users.$inferInsert>): Promise<UserWithRoles> {
+        const [updated] = await this.db
+            .update(users)
+            .set({ ...values, updatedAt: new Date() })
+            .where(eq(users.id, id))
+            .returning({ id: users.id });
+
+        if (!updated) {
+            throw new NotFoundException("User not found");
+        }
+
+        return this.findByIdOrThrow(id);
     }
 
     /**
@@ -134,81 +173,90 @@ export class UsersService {
      * flow into a way for a suspended user to lift their own suspension.
      */
     async markEmailVerified(id: string): Promise<UserWithRoles> {
-        const current = await this.prisma.user.findUniqueOrThrow({ where: { id }, select: { status: true } });
+        const current = await this.findByIdOrThrow(id);
 
-        return this.prisma.user.update({
-            where: { id },
-            data: {
-                emailVerifiedAt: new Date(),
-                status: current.status === UserStatus.PENDING_VERIFICATION ? UserStatus.ACTIVE : undefined,
-            },
-            include: withRoles,
+        return this.updateUser(id, {
+            emailVerifiedAt: new Date(),
+            status: current.status === UserStatus.PENDING_VERIFICATION ? UserStatus.ACTIVE : undefined,
         });
     }
 
     setPassword(id: string, passwordHash: string): Promise<UserWithRoles> {
-        return this.prisma.user.update({ where: { id }, data: { password: passwordHash }, include: withRoles });
+        return this.updateUser(id, { password: passwordHash });
     }
 
     /**
      * Account fields and profile fields land in two tables, so the profile row is
      * upserted: it is created lazily the first time a user fills anything in.
      */
-    updateProfile(id: string, data: UpdateProfileData): Promise<UserWithRoles> {
+    async updateProfile(id: string, data: UpdateProfileData): Promise<UserWithRoles> {
         const { profile, ...account } = data;
 
-        return this.prisma.user.update({
-            where: { id },
-            data: {
-                ...account,
-                ...(profile ? { profile: { upsert: toProfileUpsert(profile) } } : {}),
-            },
-            include: withRoles,
+        await this.findByIdOrThrow(id);
+
+        await this.db.transaction(async tx => {
+            await tx
+                .update(users)
+                .set({ ...account, updatedAt: new Date() })
+                .where(eq(users.id, id));
+
+            if (profile) {
+                const fields = {
+                    gender: profile.gender,
+                    bio: profile.bio,
+                    dateOfBirth: profile.dateOfBirth,
+                };
+
+                await tx
+                    .insert(userProfiles)
+                    .values({ userId: id, ...fields })
+                    .onConflictDoUpdate({ target: userProfiles.userId, set: { ...fields, updatedAt: new Date() } });
+            }
         });
+
+        return this.findByIdOrThrow(id);
     }
 
     async getNotificationPreferences(userId: string): Promise<NotificationPreferences> {
-        const preferences = await this.prisma.notificationPreferences.findUnique({
-            where: { userId },
-            select: notificationPreferencesSelect,
-        });
+        const [preferences] = await this.db
+            .select(notificationPreferencesColumns)
+            .from(notificationPreferences)
+            .where(eq(notificationPreferences.userId, userId))
+            .limit(1);
+
         return preferences ?? DEFAULT_NOTIFICATION_PREFERENCES;
     }
 
     /** Upserted because the row only exists once the user has saved preferences at least once. */
-    updateNotificationPreferences(
+    async updateNotificationPreferences(
         userId: string,
         data: UpdateNotificationPreferencesInput,
     ): Promise<NotificationPreferences> {
-        return this.prisma.notificationPreferences.upsert({
-            where: { userId },
-            create: { userId, ...data },
-            update: data,
-            select: notificationPreferencesSelect,
-        });
+        const [saved] = await this.db
+            .insert(notificationPreferences)
+            .values({ userId, ...data })
+            .onConflictDoUpdate({
+                target: notificationPreferences.userId,
+                set: { ...data, updatedAt: new Date() },
+            })
+            .returning(notificationPreferencesColumns);
+
+        return saved!;
     }
 
     async recordFailedLogin(id: string, maxAttempts: number, lockoutMinutes: number): Promise<UserWithRoles> {
-        const user = await this.prisma.user.findUniqueOrThrow({ where: { id } });
+        const user = await this.findByIdOrThrow(id);
         const attempts = user.failedLoginAttempts + 1;
         const shouldLock = attempts >= maxAttempts;
 
-        return this.prisma.user.update({
-            where: { id },
-            data: {
-                failedLoginAttempts: shouldLock ? 0 : attempts,
-                lockedUntil: shouldLock ? new Date(Date.now() + lockoutMinutes * 60 * 1000) : user.lockedUntil,
-            },
-            include: withRoles,
+        return this.updateUser(id, {
+            failedLoginAttempts: shouldLock ? 0 : attempts,
+            lockedUntil: shouldLock ? new Date(Date.now() + lockoutMinutes * 60 * 1000) : user.lockedUntil,
         });
     }
 
     resetFailedLogin(id: string): Promise<UserWithRoles> {
-        return this.prisma.user.update({
-            where: { id },
-            data: { failedLoginAttempts: 0, lockedUntil: null },
-            include: withRoles,
-        });
+        return this.updateUser(id, { failedLoginAttempts: 0, lockedUntil: null });
     }
 
     /**
@@ -226,40 +274,55 @@ export class UsersService {
         deleted?: boolean;
         visibleTo: { actorId: string; maxRank: number };
     }): Promise<{ items: UserWithRoles[]; total: number }> {
-        const where = {
-            deletedAt: params.deleted ? { not: null } : null,
-            AND: [
-                {
-                    OR: [
-                        { id: params.visibleTo.actorId },
-                        { roles: { none: { role: { rank: { gte: params.visibleTo.maxRank } } } } },
-                    ],
-                },
-            ],
-            ...(params.roleId ? { roles: { some: { roleId: params.roleId } } } : {}),
-            ...(params.status ? { status: params.status } : {}),
-            ...(params.search
-                ? {
-                      OR: [
-                          { email: { contains: params.search, mode: "insensitive" as const } },
-                          { username: { contains: params.search, mode: "insensitive" as const } },
-                          { name: { contains: params.search, mode: "insensitive" as const } },
-                      ],
-                  }
-                : {}),
-        };
+        const outranksActor = this.db
+            .select({ one: sql`1` })
+            .from(userRoles)
+            .innerJoin(roles, eq(roles.id, userRoles.roleId))
+            .where(and(eq(userRoles.userId, users.id), gte(roles.rank, params.visibleTo.maxRank)));
 
-        const [items, total] = await Promise.all([
-            this.prisma.user.findMany({
-                where,
-                ...toSkipTake(params),
-                orderBy: { createdAt: "desc" },
-                include: withRoles,
-            }),
-            this.prisma.user.count({ where }),
+        const hasRole = params.roleId
+            ? exists(
+                  this.db
+                      .select({ one: sql`1` })
+                      .from(userRoles)
+                      .where(and(eq(userRoles.userId, users.id), eq(userRoles.roleId, params.roleId))),
+              )
+            : undefined;
+
+        const pattern = params.search ? `%${escapeLike(params.search)}%` : undefined;
+
+        const where = and(
+            params.deleted ? isNotNull(users.deletedAt) : isNull(users.deletedAt),
+            or(eq(users.id, params.visibleTo.actorId), notExists(outranksActor)),
+            hasRole,
+            params.status ? eq(users.status, params.status) : undefined,
+            pattern
+                ? or(ilike(users.email, pattern), ilike(users.username, pattern), ilike(users.name, pattern))
+                : undefined,
+        );
+
+        const [page, total] = await Promise.all([
+            this.db
+                .select({ id: users.id })
+                .from(users)
+                .where(where)
+                .orderBy(desc(users.createdAt), desc(users.id))
+                .limit(toLimitOffset(params).limit)
+                .offset(toLimitOffset(params).offset),
+            this.db.$count(users, where),
         ]);
 
-        return { items, total };
+        if (page.length === 0) {
+            return { items: [], total };
+        }
+
+        const loaded = await this.db.query.users.findMany({
+            where: { id: { in: page.map(({ id }) => id) } },
+            with: withRoles,
+        });
+        const byId = new Map(loaded.map(user => [user.id, user]));
+
+        return { items: page.map(({ id }) => byId.get(id)!), total };
     }
 
     /**
@@ -269,31 +332,27 @@ export class UsersService {
      */
     updateByAdmin(
         id: string,
-        data: Partial<Pick<UserModel, "name" | "username" | "email" | "phone" | "avatarUrl">>,
+        data: Partial<Pick<User, "name" | "username" | "email" | "phone" | "avatarUrl">>,
         options: { resetEmailVerification?: boolean } = {},
     ): Promise<UserWithRoles> {
-        return this.prisma.user.update({
-            where: { id },
-            data: {
-                ...data,
-                ...(options.resetEmailVerification
-                    ? { emailVerifiedAt: null, status: UserStatus.PENDING_VERIFICATION }
-                    : {}),
-            },
-            include: withRoles,
+        return this.updateUser(id, {
+            ...data,
+            ...(options.resetEmailVerification
+                ? { emailVerifiedAt: null, status: UserStatus.PENDING_VERIFICATION }
+                : {}),
         });
     }
 
     updateStatus(id: string, status: UserStatus): Promise<UserWithRoles> {
-        return this.prisma.user.update({ where: { id }, data: { status }, include: withRoles });
+        return this.updateUser(id, { status });
     }
 
     softDelete(id: string): Promise<UserWithRoles> {
-        return this.prisma.user.update({ where: { id }, data: { deletedAt: new Date() }, include: withRoles });
+        return this.updateUser(id, { deletedAt: new Date() });
     }
 
     restore(id: string): Promise<UserWithRoles> {
-        return this.prisma.user.update({ where: { id }, data: { deletedAt: null }, include: withRoles });
+        return this.updateUser(id, { deletedAt: null });
     }
 
     /**
@@ -305,20 +364,12 @@ export class UsersService {
      */
     async purgeExpiredDeleted(graceDays: number): Promise<number> {
         const cutoff = new Date(Date.now() - graceDays * 24 * 60 * 60 * 1000);
-        const { count } = await this.prisma.user.deleteMany({
-            where: { deletedAt: { lt: cutoff } },
-        });
-        return count;
+        const deleted = await this.db.delete(users).where(lt(users.deletedAt, cutoff)).returning({ id: users.id });
+        return deleted.length;
     }
 }
 
-/** Shared by create and update because the two halves of an upsert take the same shape. */
-function toProfileUpsert(profile: UpdateUserProfileData) {
-    const fields = {
-        gender: profile.gender,
-        bio: profile.bio,
-        dateOfBirth: profile.dateOfBirth === undefined ? undefined : new Date(profile.dateOfBirth),
-    };
-
-    return { create: fields, update: fields };
+/** `%` and `_` in a search term are literals, not wildcards. */
+function escapeLike(term: string): string {
+    return term.replace(/[\\%_]/g, "\\$&");
 }

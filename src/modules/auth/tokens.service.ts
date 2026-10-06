@@ -6,7 +6,11 @@ import { randomUUID } from "node:crypto";
 import { generateOpaqueToken, hashToken } from "@/common/utils/token.util.js";
 import type { DeviceInfo } from "@/common/utils/device.util.js";
 import type { Env } from "@/config/env.schema.js";
-import { PrismaService } from "@/database/prisma.service.js";
+import { InjectDrizzle } from "@nestjs/drizzle";
+import { and, eq, isNull, lt, or } from "drizzle-orm";
+import type { Database } from "@/database/database.type.js";
+import { refreshTokens, type RefreshToken } from "@/database/schema/auth.js";
+import type { User } from "@/database/schema/users.js";
 
 /**
  * Deliberately carries no roles or permissions — only identity plus two version
@@ -54,20 +58,16 @@ export interface IssuedRefreshToken {
  * be told apart from the other — so the whole rotation chain is dropped.
  */
 export type RefreshTokenConsumption =
-    | { outcome: "valid"; record: RefreshTokenWithUser }
-    | { outcome: "reused"; userId: string }
-    | { outcome: "invalid" };
+    { outcome: "valid"; record: RefreshTokenWithUser } | { outcome: "reused"; userId: string } | { outcome: "invalid" };
 
-type RefreshTokenWithUser = Awaited<ReturnType<PrismaService["refreshToken"]["findUniqueOrThrow"]>> & {
-    user: Awaited<ReturnType<PrismaService["user"]["findUniqueOrThrow"]>>;
-};
+type RefreshTokenWithUser = RefreshToken & { user: User };
 
 @Injectable()
 export class TokensService {
     constructor(
         private readonly jwtService: JwtService,
         private readonly configService: ConfigService<Env, true>,
-        private readonly prisma: PrismaService,
+        @InjectDrizzle() private readonly db: Database,
     ) {}
 
     signAccessToken(payload: AccessTokenPayload): string {
@@ -87,17 +87,15 @@ export class TokensService {
         const ttlMs = ms(this.configService.get("JWT_REFRESH_TTL", { infer: true }) as ms.StringValue);
         const family = familyId ?? randomUUID();
 
-        await this.prisma.refreshToken.create({
-            data: {
-                userId,
-                tokenHash,
-                familyId: family,
-                userAgent: context.userAgent,
-                ipAddress: context.ipAddress,
-                deviceType: context.device.deviceType,
-                deviceName: context.device.deviceName,
-                expiresAt: new Date(Date.now() + ttlMs),
-            },
+        await this.db.insert(refreshTokens).values({
+            userId,
+            tokenHash,
+            familyId: family,
+            userAgent: context.userAgent,
+            ipAddress: context.ipAddress,
+            deviceType: context.device.deviceType,
+            deviceName: context.device.deviceName,
+            expiresAt: new Date(Date.now() + ttlMs),
         });
 
         return { token, familyId: family };
@@ -115,9 +113,9 @@ export class TokensService {
     async consumeRefreshToken(rawToken: string): Promise<RefreshTokenConsumption> {
         const tokenHash = hashToken(rawToken);
 
-        const record = await this.prisma.refreshToken.findUnique({
+        const record = await this.db.query.refreshTokens.findFirst({
             where: { tokenHash },
-            include: { user: true },
+            with: { user: true },
         });
 
         if (!record) {
@@ -136,49 +134,52 @@ export class TokensService {
         // Claim the token atomically. Losing this race means a concurrent request
         // just spent it — a client double-tapping refresh, not a leak, so the
         // family is left alone.
-        const { count } = await this.prisma.refreshToken.updateMany({
-            where: { id: record.id, revokedAt: null },
-            data: { revokedAt: new Date(), lastUsedAt: new Date() },
-        });
+        const claimed = await this.db
+            .update(refreshTokens)
+            .set({ revokedAt: new Date(), lastUsedAt: new Date() })
+            .where(and(eq(refreshTokens.id, record.id), isNull(refreshTokens.revokedAt)))
+            .returning({ id: refreshTokens.id });
 
-        return count === 0 ? { outcome: "invalid" } : { outcome: "valid", record };
+        return claimed.length === 0 ? { outcome: "invalid" } : { outcome: "valid", record };
     }
 
     /** Drops an entire rotation chain — every token descended from one login. */
     async revokeFamily(familyId: string): Promise<void> {
-        await this.prisma.refreshToken.updateMany({
-            where: { familyId, revokedAt: null },
-            data: { revokedAt: new Date() },
-        });
+        await this.db
+            .update(refreshTokens)
+            .set({ revokedAt: new Date() })
+            .where(and(eq(refreshTokens.familyId, familyId), isNull(refreshTokens.revokedAt)));
     }
 
     async revokeRefreshToken(rawToken: string): Promise<void> {
         const tokenHash = hashToken(rawToken);
-        await this.prisma.refreshToken.updateMany({
-            where: { tokenHash, revokedAt: null },
-            data: { revokedAt: new Date() },
-        });
+        await this.db
+            .update(refreshTokens)
+            .set({ revokedAt: new Date() })
+            .where(and(eq(refreshTokens.tokenHash, tokenHash), isNull(refreshTokens.revokedAt)));
     }
 
     async revokeAllRefreshTokens(userId: string): Promise<void> {
-        await this.prisma.refreshToken.updateMany({
-            where: { userId, revokedAt: null },
-            data: { revokedAt: new Date() },
-        });
+        await this.db
+            .update(refreshTokens)
+            .set({ revokedAt: new Date() })
+            .where(and(eq(refreshTokens.userId, userId), isNull(refreshTokens.revokedAt)));
     }
 
     listActiveSessions(userId: string) {
-        return this.prisma.refreshToken.findMany({
-            where: { userId, revokedAt: null, expiresAt: { gt: new Date() } },
+        return this.db.query.refreshTokens.findMany({
+            where: { userId, revokedAt: { isNull: true }, expiresAt: { gt: new Date() } },
             orderBy: { lastUsedAt: "desc" },
         });
     }
 
     async revokeSessionById(userId: string, sessionId: string): Promise<void> {
-        await this.prisma.refreshToken.updateMany({
-            where: { id: sessionId, userId, revokedAt: null },
-            data: { revokedAt: new Date() },
-        });
+        await this.db
+            .update(refreshTokens)
+            .set({ revokedAt: new Date() })
+            .where(
+                and(eq(refreshTokens.id, sessionId), eq(refreshTokens.userId, userId), isNull(refreshTokens.revokedAt)),
+            );
     }
 
     /** Short-lived token proving a password check passed, so a 2FA code can be requested next without re-authenticating. */
@@ -196,13 +197,12 @@ export class TokensService {
     async purgeExpired(revokedRetentionDays: number): Promise<number> {
         const revokedCutoff = new Date(Date.now() - revokedRetentionDays * 24 * 60 * 60 * 1000);
 
-        const { count } = await this.prisma.refreshToken.deleteMany({
-            where: {
-                OR: [{ expiresAt: { lt: new Date() } }, { revokedAt: { lt: revokedCutoff } }],
-            },
-        });
+        const deleted = await this.db
+            .delete(refreshTokens)
+            .where(or(lt(refreshTokens.expiresAt, new Date()), lt(refreshTokens.revokedAt, revokedCutoff)))
+            .returning({ id: refreshTokens.id });
 
-        return count;
+        return deleted.length;
     }
 
     verifyTwoFactorToken(token: string): string {
