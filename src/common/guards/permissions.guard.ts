@@ -68,6 +68,8 @@ export class PermissionsGuard implements CanActivate {
             .switchToHttp()
             .getRequest<Request & { user: AccessTokenPayload; hostContext?: HostContext }>();
         const claims = request.user;
+        // The token signature is already verified, so this is safe to tag logs and rate limits with.
+        this.tenantContext.setUser(claims.sub);
         const host: HostContext = request.hostContext ?? { kind: "apex", tenant: null };
 
         const user =

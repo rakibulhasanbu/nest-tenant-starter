@@ -179,9 +179,9 @@ Phases 0–7 are implemented on the fresh database `nest_tenant_starter`; verifi
 | `TenantDb.run(fn)` helper that opens a transaction and sets `app.tenant_id` | `TenantAwarePool` (`src/database/tenant-aware-pool.ts`) stamps **every** connection checkout from the request's tenant, so no query can skip it. `TenantContext.runAs / runAsSystem` for explicit scopes. |
 | Env `SUPER_ADMIN_EMAIL/PASSWORD` | Existing `ADMIN_EMAIL/ADMIN_PASSWORD` kept (also the address that receives "pending approval" notices). |
 | Membership statuses `ACTIVE\|INVITED\|SUSPENDED` | `ACTIVE\|SUSPENDED` only — an invite adds an ACTIVE membership (new address gets an account + reset-code email; existing account is simply added). |
-| Platform "enter tenant" with audit log | Deferred: nothing in the API lets the super admin act inside a tenant yet, so there is nothing to audit. Add `audit_logs` together with that feature. |
-| Per-tenant throttling, tenant-prefixed log context | Not done (throttling is still per IP). Redis permission keys are tenant-scoped. |
-| Import-boundary lint rule | Rules are documented in `architecture.md` and followed; no automated lint rule yet. |
+| Platform "enter tenant" with audit log | `audit_logs` is built (event-driven, append-only; see `architecture.md`). "Enter tenant" itself is still not built; when it is, its audit entry must be written in the same transaction, not via an event. |
+| Per-tenant throttling, tenant-prefixed log context | Done: throttler runs after auth (per user/IP + one shared per-tenant bucket); `ContextAwareLogger` tags requestId/tenantId/userId. Redis permission keys are tenant-scoped. |
+| Import-boundary lint rule | Done: `no-restricted-imports` overrides in `.oxlintrc.json` (`pnpm lint`). Contexts: identity = users+auth, access = tenants+authorization. |
 | `permissions.level` | Done, plus `PLATFORM_PERMISSIONS` constant and platform keys. |
 | Role contract unchanged | `roleIds` stay slugs. `PATCH /admin/users/:id` and `POST /admin/users/:id/restore` were **removed** for tenant admins (identity is global); membership status replaces account status in admin routes. See `architecture.md` → "Multi-tenant API additions". |
 

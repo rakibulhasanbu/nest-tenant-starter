@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException, type NestMiddleware } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { randomUUID } from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
 import type { RequestWithHost } from "@/common/types/host-context.type.js";
 import { runWithTenantStore } from "@/common/tenant/tenant-context.js";
@@ -31,11 +32,16 @@ export class TenantHostMiddleware implements NestMiddleware {
         this.platformSubdomain = configService.get("PLATFORM_SUBDOMAIN", { infer: true });
     }
 
-    use(req: Request, _res: Response, next: NextFunction): void {
+    use(req: Request, res: Response, next: NextFunction): void {
         // Behind a proxy Express resolves `req.hostname` from X-Forwarded-Host only when `trust proxy` is set.
         const parsed = parseHost(req.hostname, this.rootDomain, this.platformSubdomain);
 
-        runWithTenantStore({}, () => {
+        // A caller-supplied id is only kept if it is a harmless token, so it cannot forge log lines.
+        const supplied = req.headers["x-request-id"];
+        const requestId = typeof supplied === "string" && /^[\w-]{8,64}$/.test(supplied) ? supplied : randomUUID();
+        res.setHeader("X-Request-Id", requestId);
+
+        runWithTenantStore({ requestId }, () => {
             this.resolve(parsed, req as RequestWithHost).then(
                 () => next(),
                 (error: unknown) => next(error),

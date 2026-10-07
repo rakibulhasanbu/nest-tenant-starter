@@ -6,5 +6,241 @@
   },
   "env": {
     "node": true
-  }
+  },
+  "overrides": [
+    {
+      "files": [
+        "src/modules/**/*.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@/database/schema/users.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/auth.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/tenants.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/authorization.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/tenant-requests.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/tenant-invitations.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/audit-logs.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "src/modules/users/**/*.ts",
+        "src/modules/auth/**/*.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@/database/schema/tenants.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/authorization.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/tenant-requests.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/tenant-invitations.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/audit-logs.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "src/modules/tenants/**/*.ts",
+        "src/modules/authorization/**/*.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@/database/schema/users.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/auth.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/tenant-requests.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/tenant-invitations.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/audit-logs.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "src/modules/tenant-requests/**/*.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@/database/schema/users.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/auth.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/tenants.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/authorization.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/tenant-invitations.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/audit-logs.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "src/modules/tenant-invitations/**/*.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@/database/schema/users.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/auth.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/tenants.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/authorization.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/tenant-requests.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/audit-logs.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "src/modules/audit/**/*.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@/database/schema/users.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/auth.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/tenants.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/authorization.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/tenant-requests.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              },
+              {
+                "name": "@/database/schema/tenant-invitations.js",
+                "message": "A module owns its tables. Call the owning module's exported service instead (see context/architecture.md)."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": [
+        "**/*.spec.ts"
+      ],
+      "rules": {
+        "no-restricted-imports": "off"
+      }
+    }
+  ]
 }

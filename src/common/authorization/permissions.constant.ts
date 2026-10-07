@@ -42,12 +42,15 @@ export const PERMISSIONS = {
 
     PERMISSION_READ: "permission:read",
 
+    AUDIT_READ: "audit:read",
+
     PLATFORM_TENANT_READ: "platform:tenant:read",
     PLATFORM_TENANT_REVIEW: "platform:tenant:review",
     PLATFORM_TENANT_CREATE: "platform:tenant:create",
     PLATFORM_TENANT_SUSPEND: "platform:tenant:suspend",
     PLATFORM_SETTINGS_READ: "platform:settings:read",
     PLATFORM_SETTINGS_WRITE: "platform:settings:write",
+    PLATFORM_AUDIT_READ: "platform:audit:read",
 } as const;
 
 export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
@@ -60,6 +63,7 @@ export const PLATFORM_PERMISSIONS: readonly PermissionKey[] = [
     PERMISSIONS.PLATFORM_TENANT_SUSPEND,
     PERMISSIONS.PLATFORM_SETTINGS_READ,
     PERMISSIONS.PLATFORM_SETTINGS_WRITE,
+    PERMISSIONS.PLATFORM_AUDIT_READ,
 ];
 
 export const PERMISSION_CATALOG: readonly PermissionDefinition[] = [
@@ -206,6 +210,22 @@ export const PERMISSION_CATALOG: readonly PermissionDefinition[] = [
         action: "write",
         scope: "",
         description: "Change platform settings such as tenant approval",
+    },
+    {
+        key: PERMISSIONS.AUDIT_READ,
+        level: "tenant",
+        resource: "audit",
+        action: "read",
+        scope: "",
+        description: "View this tenant's audit log",
+    },
+    {
+        key: PERMISSIONS.PLATFORM_AUDIT_READ,
+        level: "platform",
+        resource: "platform-audit",
+        action: "read",
+        scope: "",
+        description: "View the platform audit log across all tenants",
     },
 ];
 

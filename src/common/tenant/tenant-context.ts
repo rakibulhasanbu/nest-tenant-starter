@@ -16,6 +16,10 @@ import { Injectable } from "@nestjs/common";
 export interface TenantStore {
     tenantId?: string;
     system?: boolean;
+    /** Correlation id of the HTTP request this work belongs to. Logging only; never an authorization input. */
+    requestId?: string;
+    /** The verified token subject. Logging and rate limiting only; the guard's principal is what authorizes. */
+    userId?: string;
 }
 
 const storage = new AsyncLocalStorage<TenantStore>();
@@ -23,6 +27,12 @@ const storage = new AsyncLocalStorage<TenantStore>();
 /** Read by the database pool on every connection checkout; not for application code. */
 export function currentTenantStore(): TenantStore | undefined {
     return storage.getStore();
+}
+
+/** What a nested scope keeps from its parent: who and which request, never which tenant. */
+function correlation(): Pick<TenantStore, "requestId" | "userId"> {
+    const { requestId, userId } = storage.getStore() ?? {};
+    return { requestId, userId };
 }
 
 export function runWithTenantStore<T>(store: TenantStore, fn: () => T): T {
@@ -44,6 +54,18 @@ export class TenantContext {
         return tenantId;
     }
 
+    get userId(): string | undefined {
+        return storage.getStore()?.userId;
+    }
+
+    /** Called by the guard once the token's subject has been verified. */
+    setUser(userId: string): void {
+        const store = storage.getStore();
+        if (store) {
+            store.userId = userId;
+        }
+    }
+
     /** Called by the guard once the token's tenant has been verified. */
     setTenant(tenantId: string | undefined): void {
         const store = storage.getStore();
@@ -61,11 +83,11 @@ export class TenantContext {
      * in the caller's scope — silently under the wrong tenant.
      */
     runAs<T>(tenantId: string, fn: () => T | PromiseLike<T>): Promise<T> {
-        return storage.run({ tenantId }, async () => await fn());
+        return storage.run({ ...correlation(), tenantId }, async () => await fn());
     }
 
     /** Runs `fn` with cross-tenant visibility. Keep the callback small and obvious. */
     runAsSystem<T>(fn: () => T | PromiseLike<T>): Promise<T> {
-        return storage.run({ system: true }, async () => await fn());
+        return storage.run({ ...correlation(), system: true }, async () => await fn());
     }
 }

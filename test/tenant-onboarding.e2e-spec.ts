@@ -140,7 +140,7 @@ describe("Tenant onboarding (e2e)", () => {
             .send({ name: "Again", slug: uniqueSlug(), requestId })
             .expect(409);
 
-        // Resend is throttled right after sending, then accepted once the cooldown is cleared.
+        // Resend is throttled right after sending.
         const reissue = await platform(
             "post",
             `/tenants/${tenantResponse.body.data.tenant.id}/resend-invite`,
@@ -148,23 +148,28 @@ describe("Tenant onboarding (e2e)", () => {
         );
         expect(reissue.status).toBe(429);
 
-        const { code, expiresAt } = invites.mock.calls[0]![0] as { code: string; expiresAt: Date };
+        const { acceptUrl, expiresAt } = invites.mock.calls[0]![0] as { acceptUrl: string; expiresAt: Date };
+        const token = new URL(acceptUrl).searchParams.get("token")!;
+        expect(acceptUrl).toContain(`${slug}.`);
         const ttlDays = (new Date(expiresAt).getTime() - Date.now()) / 86_400_000;
-        expect(ttlDays).toBeGreaterThan(2.9);
+        expect(ttlDays).toBeGreaterThan(6.9);
 
-        // The invitation code is single-use and sets the first password.
+        // A wrong token is refused; the real one is single-use and sets the first password.
         await request(h.app.getHttpServer())
             .post(`${API}/auth/accept-invite`)
-            .set("Host", hostOf(slug))
-            .send({ email: body.email, code: "000000", password: "Brand-new-pass1!" })
+            .send({ token: "0".repeat(64), password: "Brand-new-pass1!" })
             .expect(400);
 
         const accepted = await request(h.app.getHttpServer())
             .post(`${API}/auth/accept-invite`)
-            .set("Host", hostOf(slug))
-            .send({ email: body.email, code, password: "Brand-new-pass1!" })
+            .send({ token, password: "Brand-new-pass1!" })
             .expect(200);
         expect(accepted.body.data.tenant).toMatchObject({ slug });
+
+        await request(h.app.getHttpServer())
+            .post(`${API}/auth/accept-invite`)
+            .send({ token, password: "Another-pass1!" })
+            .expect(400);
 
         await request(h.app.getHttpServer())
             .post(`${API}/auth/signin`)
@@ -189,10 +194,9 @@ describe("Tenant onboarding (e2e)", () => {
         const tenantId = created.body.data.tenant.id as string;
 
         // Simulate the cooldown having passed.
-        const owner = await h.users.findByEmail(ownerEmail);
         await h.admin.$client.query(
-            `UPDATE email_tokens SET created_at = now() - interval '5 minutes' WHERE user_id = $1`,
-            [owner!.id],
+            `UPDATE tenant_invitations SET sent_at = now() - interval '5 minutes' WHERE tenant_id = $1`,
+            [tenantId],
         );
         await platform("post", `/tenants/${tenantId}/resend-invite`, admin.accessToken).expect(204);
         expect(invites).toHaveBeenCalledTimes(2);

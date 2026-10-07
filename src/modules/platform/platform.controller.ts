@@ -4,6 +4,8 @@ import { CurrentUser } from "@/common/decorators/current-user.decorator.js";
 import { RequirePermissions } from "@/common/decorators/require-permissions.decorator.js";
 import type { AuthenticatedUser } from "@/common/types/authenticated-request.type.js";
 import { paginate } from "@/common/utils/pagination.util.js";
+import { AuditService } from "@/modules/audit/audit.service.js";
+import { ListPlatformAuditLogsDto } from "@/modules/audit/dto/list-audit-logs.schema.js";
 import { CreatePlatformTenantDto } from "@/modules/platform/dto/create-platform-tenant.schema.js";
 import { ListTenantsDto } from "@/modules/platform/dto/list-tenants.schema.js";
 import { RejectTenantDto } from "@/modules/platform/dto/reject-tenant.schema.js";
@@ -26,6 +28,7 @@ export class PlatformController {
         private readonly settingsService: PlatformSettingsService,
         private readonly onboardingService: TenantOnboardingService,
         private readonly requestsService: TenantRequestsService,
+        private readonly auditService: AuditService,
     ) {}
 
     @RequirePermissions(PERMISSIONS.PLATFORM_TENANT_READ)
@@ -99,15 +102,22 @@ export class PlatformController {
     @RequirePermissions(PERMISSIONS.PLATFORM_TENANT_SUSPEND)
     @HttpCode(HttpStatus.OK)
     @Post("tenants/:id/suspend")
-    suspend(@Param("id") id: string) {
-        return this.tenantsService.suspend(id);
+    suspend(@CurrentUser() actor: AuthenticatedUser, @Param("id") id: string) {
+        return this.tenantsService.suspend(id, actor.id);
     }
 
     @RequirePermissions(PERMISSIONS.PLATFORM_TENANT_SUSPEND)
     @HttpCode(HttpStatus.OK)
     @Post("tenants/:id/reactivate")
-    reactivate(@Param("id") id: string) {
-        return this.tenantsService.reactivate(id);
+    reactivate(@CurrentUser() actor: AuthenticatedUser, @Param("id") id: string) {
+        return this.tenantsService.reactivate(id, actor.id);
+    }
+
+    @RequirePermissions(PERMISSIONS.PLATFORM_AUDIT_READ)
+    @Get("audit-logs")
+    async listAuditLogs(@Query() query: ListPlatformAuditLogsDto) {
+        const { items, total } = await this.auditService.listForPlatform(query);
+        return paginate(items, query, total);
     }
 
     @RequirePermissions(PERMISSIONS.PLATFORM_SETTINGS_READ)

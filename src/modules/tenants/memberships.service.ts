@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, Injectable } from "@nestjs/common";
 import { InjectDrizzle } from "@nestjs/drizzle";
 import { EventEmitter2 } from "@nestjs/event-emitter";
-import { and, desc, eq, exists, gte, ilike, inArray, notExists, or, sql } from "drizzle-orm";
+import { and, desc, eq, exists, gte, inArray, notExists, or, sql } from "drizzle-orm";
 import { ROLE_SLUGS } from "@/common/authorization/role-templates.constant.js";
 import { TenantContext } from "@/common/tenant/tenant-context.js";
 import { toLimitOffset } from "@/common/utils/pagination.util.js";
@@ -9,9 +9,9 @@ import type { Database, DbClient } from "@/database/database.type.js";
 import { membershipRoles, roles } from "@/database/schema/authorization.js";
 import { MembershipStatus } from "@/database/schema/enums.js";
 import { tenantMemberships, tenants } from "@/database/schema/tenants.js";
-import { users } from "@/database/schema/users.js";
 import { PermissionsService } from "@/modules/authorization/permissions.service.js";
 import { TenantEvents, type MembershipAddedEvent } from "@/modules/tenants/tenant.events.js";
+import { UsersService } from "@/modules/users/users.service.js";
 
 export interface MemberSummary {
     userId: string;
@@ -31,6 +31,7 @@ export class MembershipsService {
         @InjectDrizzle() private readonly db: Database,
         private readonly tenantContext: TenantContext,
         private readonly permissionsService: PermissionsService,
+        private readonly usersService: UsersService,
         private readonly events: EventEmitter2,
     ) {}
 
@@ -78,7 +79,7 @@ export class MembershipsService {
         );
 
         const [tenant] = await this.db.select().from(tenants).where(eq(tenants.id, tenantId));
-        const [user] = await this.db.select({ email: users.email }).from(users).where(eq(users.id, userId));
+        const user = await this.usersService.findById(userId);
         if (tenant && user) {
             this.events.emit(TenantEvents.MEMBERSHIP_ADDED, {
                 tenant,
@@ -167,23 +168,17 @@ export class MembershipsService {
                   )
                 : undefined;
 
-            const pattern = params.search ? `%${params.search.replace(/[\\%_]/g, "\\$&")}%` : undefined;
-
             const where = and(
                 eq(tenantMemberships.tenantId, tenantId),
                 or(eq(tenantMemberships.userId, params.visibleTo.actorId), notExists(outranksActor)),
                 hasRole,
                 params.status ? eq(tenantMemberships.status, params.status) : undefined,
-                pattern
-                    ? or(ilike(users.email, pattern), ilike(users.username, pattern), ilike(users.name, pattern))
+                params.search
+                    ? inArray(tenantMemberships.userId, this.usersService.matchingIdsQuery(params.search))
                     : undefined,
             );
 
-            const base = this.db
-                .select({ userId: tenantMemberships.userId })
-                .from(tenantMemberships)
-                .innerJoin(users, eq(users.id, tenantMemberships.userId))
-                .where(where);
+            const base = this.db.select({ userId: tenantMemberships.userId }).from(tenantMemberships).where(where);
 
             const { limit, offset } = toLimitOffset(params);
             const [page, [totals]] = await Promise.all([
@@ -194,7 +189,6 @@ export class MembershipsService {
                 this.db
                     .select({ total: sql<number>`count(*)::int` })
                     .from(tenantMemberships)
-                    .innerJoin(users, eq(users.id, tenantMemberships.userId))
                     .where(where),
             ]);
 

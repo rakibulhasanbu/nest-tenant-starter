@@ -1,12 +1,10 @@
 import { z } from "zod";
 import { createZodDto } from "nestjs-zod";
-import { tenantSlugField } from "@/modules/auth/dto/tenant-fields.js";
 
+/** The token comes from the emailed link; it already names the tenant, so no email or slug is sent. */
 export const acceptInviteSchema = z.strictObject({
-    email: z.email(),
-    code: z.string().regex(/^\d{6}$/),
+    token: z.string().regex(/^[0-9a-f]{64}$/),
     password: z.string().min(8).max(72),
-    tenantSlug: tenantSlugField,
     deviceType: z.string().min(1).max(50).optional(),
     deviceName: z.string().min(1).max(100).optional(),
 });

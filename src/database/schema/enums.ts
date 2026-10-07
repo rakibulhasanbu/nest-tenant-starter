@@ -18,6 +18,7 @@ export const EmailTokenType = {
     RESET_PASSWORD: "RESET_PASSWORD",
     DELETE_ACCOUNT: "DELETE_ACCOUNT",
     REACTIVATE_ACCOUNT: "REACTIVATE_ACCOUNT",
+    /** Unused since owner invitations moved to `tenant_invitations`; Postgres cannot drop an enum value, so it stays. */
     INVITE: "INVITE",
 } as const;
 export type EmailTokenType = (typeof EmailTokenType)[keyof typeof EmailTokenType];
@@ -108,4 +109,14 @@ export type TenantRequestStatus = (typeof TenantRequestStatus)[keyof typeof Tena
 export const tenantRequestStatusEnum = pgEnum(
     "tenant_request_status",
     Object.values(TenantRequestStatus) as [TenantRequestStatus, ...TenantRequestStatus[]],
+);
+
+export const TenantInvitationStatus = {
+    PENDING: "PENDING",
+    ACCEPTED: "ACCEPTED",
+} as const;
+export type TenantInvitationStatus = (typeof TenantInvitationStatus)[keyof typeof TenantInvitationStatus];
+export const tenantInvitationStatusEnum = pgEnum(
+    "tenant_invitation_status",
+    Object.values(TenantInvitationStatus) as [TenantInvitationStatus, ...TenantInvitationStatus[]],
 );

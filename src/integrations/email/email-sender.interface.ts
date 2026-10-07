@@ -57,13 +57,43 @@ export interface MembershipAddedMessage {
     url: string;
 }
 
-/** Sent to a brand-new owner of a tenant the super admin created; the code is redeemed with the password they choose. */
+/** Sent to a brand-new owner of a tenant the super admin created; `acceptUrl` carries the one-time token. */
 export interface TenantOwnerInviteMessage {
     to: string;
     tenantName: string;
-    url: string;
-    code: string;
+    acceptUrl: string;
     expiresAt: Date;
+}
+
+/** The same invitation again, with a fresh link, because it has not been accepted yet. */
+export interface TenantOwnerInviteReminderMessage extends TenantOwnerInviteMessage {
+    reminderNumber: number;
+}
+
+/** Sent to the super admin when an unaccepted invitation was cleaned up. */
+export interface TenantInvitationAbandonedMessage {
+    to: string;
+    tenantName: string;
+    tenantSlug: string;
+    ownerEmail: string;
+}
+
+/** Sent to the super admin when a registration request arrives. */
+export interface TenantRequestSubmittedMessage {
+    to: string;
+    businessName: string;
+    ownerName: string;
+    ownerEmail: string;
+}
+
+/** Sent to the super admin while a request is still waiting on them. */
+export interface TenantRequestReminderMessage {
+    to: string;
+    businessName: string;
+    ownerEmail: string;
+    /** REVIEW: nobody has approved or rejected it. CREATE_TENANT: approved, but no tenant exists yet. */
+    stage: "REVIEW" | "CREATE_TENANT";
+    reminderNumber: number;
 }
 
 export interface TenantRequestReceivedMessage {
@@ -100,6 +130,10 @@ export interface EmailSender {
     sendTenantRejected(message: TenantRejectedMessage): Promise<void>;
     sendMembershipAdded(message: MembershipAddedMessage): Promise<void>;
     sendTenantOwnerInvite(message: TenantOwnerInviteMessage): Promise<void>;
+    sendTenantOwnerInviteReminder(message: TenantOwnerInviteReminderMessage): Promise<void>;
+    sendTenantInvitationAbandoned(message: TenantInvitationAbandonedMessage): Promise<void>;
+    sendTenantRequestSubmitted(message: TenantRequestSubmittedMessage): Promise<void>;
+    sendTenantRequestReminder(message: TenantRequestReminderMessage): Promise<void>;
     sendTenantRequestReceived(message: TenantRequestReceivedMessage): Promise<void>;
     sendTenantRequestApproved(message: TenantRequestApprovedMessage): Promise<void>;
     sendTenantRequestRejected(message: TenantRequestRejectedMessage): Promise<void>;

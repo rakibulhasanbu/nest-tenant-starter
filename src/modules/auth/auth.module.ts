@@ -3,6 +3,7 @@ import { JwtModule } from "@nestjs/jwt";
 import { PassportModule } from "@nestjs/passport";
 import { EmailModule } from "@/integrations/email/email.module.js";
 import { UsersModule } from "@/modules/users/users.module.js";
+import { TenantInvitationsModule } from "@/modules/tenant-invitations/tenant-invitations.module.js";
 import { TenantsModule } from "@/modules/tenants/tenants.module.js";
 import { AuthController } from "@/modules/auth/auth.controller.js";
 import { AuthService } from "@/modules/auth/auth.service.js";
@@ -15,7 +16,7 @@ import { AuthCleanupTask } from "@/modules/auth/auth-cleanup.task.js";
 import { JwtStrategy } from "@/modules/auth/strategies/jwt.strategy.js";
 
 @Module({
-    imports: [PassportModule, JwtModule.register({}), UsersModule, TenantsModule, EmailModule],
+    imports: [PassportModule, JwtModule.register({}), UsersModule, TenantsModule, TenantInvitationsModule, EmailModule],
     controllers: [AuthController],
     providers: [
         AuthService,

@@ -8,7 +8,11 @@ import type {
     ReactivateAccountMessage,
     ResetPasswordMessage,
     TenantApprovedMessage,
+    TenantInvitationAbandonedMessage,
     TenantOwnerInviteMessage,
+    TenantOwnerInviteReminderMessage,
+    TenantRequestReminderMessage,
+    TenantRequestSubmittedMessage,
     TenantRequestApprovedMessage,
     TenantRequestReceivedMessage,
     TenantRequestRejectedMessage,
@@ -71,8 +75,34 @@ export class ConsoleEmailSender implements EmailSender {
 
     async sendTenantOwnerInvite(message: TenantOwnerInviteMessage): Promise<void> {
         this.logger.log(
-            `[tenant-owner-invite] to=${message.to} tenant=${message.tenantName} code=${message.code} ` +
-                `url=${message.url} expiresAt=${message.expiresAt.toISOString()}`,
+            `[tenant-owner-invite] to=${message.to} tenant=${message.tenantName} ` +
+                `acceptUrl=${message.acceptUrl} expiresAt=${message.expiresAt.toISOString()}`,
+        );
+    }
+
+    async sendTenantOwnerInviteReminder(message: TenantOwnerInviteReminderMessage): Promise<void> {
+        this.logger.log(
+            `[tenant-owner-invite-reminder] to=${message.to} tenant=${message.tenantName} #${message.reminderNumber} ` +
+                `acceptUrl=${message.acceptUrl} expiresAt=${message.expiresAt.toISOString()}`,
+        );
+    }
+
+    async sendTenantInvitationAbandoned(message: TenantInvitationAbandonedMessage): Promise<void> {
+        this.logger.log(
+            `[tenant-invitation-abandoned] to=${message.to} tenant=${message.tenantSlug} owner=${message.ownerEmail}`,
+        );
+    }
+
+    async sendTenantRequestSubmitted(message: TenantRequestSubmittedMessage): Promise<void> {
+        this.logger.log(
+            `[tenant-request-submitted] to=${message.to} business=${message.businessName} owner=${message.ownerEmail}`,
+        );
+    }
+
+    async sendTenantRequestReminder(message: TenantRequestReminderMessage): Promise<void> {
+        this.logger.log(
+            `[tenant-request-reminder] to=${message.to} business=${message.businessName} ` +
+                `stage=${message.stage} #${message.reminderNumber}`,
         );
     }
 

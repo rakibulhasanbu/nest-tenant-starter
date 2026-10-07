@@ -12,6 +12,8 @@ export const TenantEvents = {
     SUSPENDED: "tenant.suspended",
     REACTIVATED: "tenant.reactivated",
     MEMBERSHIP_ADDED: "membership.added",
+    DELETED: "tenant.deleted",
+    SETTINGS_UPDATED: "platform.settings-updated",
 } as const;
 
 export interface TenantCreatedEvent {
@@ -24,10 +26,22 @@ export interface TenantReviewedEvent {
     tenant: Tenant;
     /** The address of whoever created the tenant, who is told the outcome. */
     ownerEmail: string | null;
+    /** The super admin who made the change. */
+    actorId: string;
 }
 
 export interface MembershipAddedEvent {
     tenant: Tenant;
     userId: string;
     userEmail: string;
+}
+
+export interface TenantDeletedEvent {
+    tenant: Tenant;
+}
+
+export interface PlatformSettingsUpdatedEvent {
+    actorId: string;
+    /** Only the fields that were changed. */
+    changes: Record<string, unknown>;
 }

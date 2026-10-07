@@ -18,7 +18,7 @@ import { TenantContext } from "@/common/tenant/tenant-context.js";
 import { buildTenantUrl } from "@/common/tenant/tenant-host.util.js";
 import { toLimitOffset, type PaginationParams } from "@/common/utils/pagination.util.js";
 import type { Env } from "@/config/env.schema.js";
-import type { Database } from "@/database/database.type.js";
+import type { Database, DbClient } from "@/database/database.type.js";
 import { TenantOnboardingMode, TenantStatus } from "@/database/schema/enums.js";
 import { tenantMemberships, tenants, type Tenant } from "@/database/schema/tenants.js";
 import { RedisService } from "@/integrations/redis/redis.service.js";
@@ -26,7 +26,12 @@ import { PermissionsService } from "@/modules/authorization/permissions.service.
 import { RoleProvisioningService } from "@/modules/authorization/role-provisioning.service.js";
 import { PlatformSettingsService } from "@/modules/tenants/platform-settings.service.js";
 import type { CreateTenantInput } from "@/modules/tenants/dto/create-tenant.schema.js";
-import { TenantEvents, type TenantCreatedEvent, type TenantReviewedEvent } from "@/modules/tenants/tenant.events.js";
+import {
+    TenantEvents,
+    type TenantCreatedEvent,
+    type TenantDeletedEvent,
+    type TenantReviewedEvent,
+} from "@/modules/tenants/tenant.events.js";
 import { UsersService } from "@/modules/users/users.service.js";
 
 const TENANT_INVALIDATION_CHANNEL = "tenant:invalidate";
@@ -201,6 +206,33 @@ export class TenantsService implements OnModuleInit {
         return tenant;
     }
 
+    /**
+     * Removes a tenant nobody ever used: it must have exactly one member, `ownerId`.
+     * Anything else — a second member, a different member — means somebody is
+     * relying on it, so nothing is touched. Run inside a system scope, in the
+     * caller's transaction, so removing the tenant and its owner land together;
+     * `announceDeleted` follows the commit.
+     */
+    async deleteUnclaimed(tenantId: string, ownerId: string, tx: DbClient): Promise<Tenant | null> {
+        const members = await tx
+            .select({ userId: tenantMemberships.userId })
+            .from(tenantMemberships)
+            .where(eq(tenantMemberships.tenantId, tenantId));
+
+        if (members.length !== 1 || members[0]!.userId !== ownerId) {
+            return null;
+        }
+
+        const [deleted] = await tx.delete(tenants).where(eq(tenants.id, tenantId)).returning();
+        return deleted ?? null;
+    }
+
+    /** Call once the transaction that ran `deleteUnclaimed` has committed: drops caches and tells the rest of the system. */
+    announceDeleted(tenant: Tenant): void {
+        this.invalidateCache();
+        this.events.emit(TenantEvents.DELETED, { tenant } satisfies TenantDeletedEvent);
+    }
+
     async updateName(tenantId: string, name: string): Promise<Tenant> {
         const [updated] = await this.db
             .update(tenants)
@@ -267,7 +299,7 @@ export class TenantsService implements OnModuleInit {
     }
 
     approve(id: string, reviewerId: string): Promise<Tenant> {
-        return this.transition(id, [TenantStatus.PENDING_APPROVAL], TenantStatus.ACTIVE, TenantEvents.APPROVED, {
+        return this.transition(id, [TenantStatus.PENDING_APPROVAL], TenantStatus.ACTIVE, TenantEvents.APPROVED, reviewerId, {
             reviewedBy: reviewerId,
             reviewedAt: new Date(),
             rejectionReason: null,
@@ -275,19 +307,19 @@ export class TenantsService implements OnModuleInit {
     }
 
     reject(id: string, reviewerId: string, reason: string | undefined): Promise<Tenant> {
-        return this.transition(id, [TenantStatus.PENDING_APPROVAL], TenantStatus.REJECTED, TenantEvents.REJECTED, {
+        return this.transition(id, [TenantStatus.PENDING_APPROVAL], TenantStatus.REJECTED, TenantEvents.REJECTED, reviewerId, {
             reviewedBy: reviewerId,
             reviewedAt: new Date(),
             rejectionReason: reason ?? null,
         });
     }
 
-    suspend(id: string): Promise<Tenant> {
-        return this.transition(id, [TenantStatus.ACTIVE], TenantStatus.SUSPENDED, TenantEvents.SUSPENDED, {});
+    suspend(id: string, actorId: string): Promise<Tenant> {
+        return this.transition(id, [TenantStatus.ACTIVE], TenantStatus.SUSPENDED, TenantEvents.SUSPENDED, actorId, {});
     }
 
-    reactivate(id: string): Promise<Tenant> {
-        return this.transition(id, [TenantStatus.SUSPENDED], TenantStatus.ACTIVE, TenantEvents.REACTIVATED, {});
+    reactivate(id: string, actorId: string): Promise<Tenant> {
+        return this.transition(id, [TenantStatus.SUSPENDED], TenantStatus.ACTIVE, TenantEvents.REACTIVATED, actorId, {});
     }
 
     private async transition(
@@ -295,6 +327,7 @@ export class TenantsService implements OnModuleInit {
         from: TenantStatus[],
         to: TenantStatus,
         event: string,
+        actorId: string,
         extra: Partial<typeof tenants.$inferInsert>,
     ): Promise<Tenant> {
         const current = await this.findByIdUncached(id);
@@ -325,7 +358,7 @@ export class TenantsService implements OnModuleInit {
         this.invalidateCache();
 
         const owner = updated.createdBy ? await this.usersService.findById(updated.createdBy) : null;
-        this.events.emit(event, { tenant: updated, ownerEmail: owner?.email ?? null } satisfies TenantReviewedEvent);
+        this.events.emit(event, { tenant: updated, ownerEmail: owner?.email ?? null, actorId } satisfies TenantReviewedEvent);
 
         return updated;
     }

@@ -3,9 +3,11 @@ import * as auth from "@/database/schema/auth.js";
 import * as authorization from "@/database/schema/authorization.js";
 import * as tenants from "@/database/schema/tenants.js";
 import * as tenantRequests from "@/database/schema/tenant-requests.js";
+import * as tenantInvitations from "@/database/schema/tenant-invitations.js";
+import * as auditLogs from "@/database/schema/audit-logs.js";
 import * as users from "@/database/schema/users.js";
 
-export const schema = { ...users, ...tenants, ...tenantRequests, ...authorization, ...auth };
+export const schema = { ...users, ...tenants, ...tenantRequests, ...tenantInvitations, ...auditLogs, ...authorization, ...auth };
 
 export const relations = defineRelations(schema, r => ({
     users: {

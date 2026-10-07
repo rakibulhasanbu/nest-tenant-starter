@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
 import { InjectDrizzle } from "@nestjs/drizzle";
-import { eq, lt } from "drizzle-orm";
-import type { Database } from "@/database/database.type.js";
+import { and, eq, ilike, isNull, lt, or, sql } from "drizzle-orm";
+import type { Database, DbClient } from "@/database/database.type.js";
 import { Gender, UserStatus } from "@/database/schema/enums.js";
 import { notificationPreferences, userProfiles, users, type User, type UserProfile } from "@/database/schema/users.js";
 import type { UpdateNotificationPreferencesInput } from "@/modules/users/dto/update-notification-preferences.schema.js";
@@ -90,6 +90,27 @@ export class UsersService {
 
         const found = await this.db.query.users.findMany({ where: { id: { in: ids } }, with: withProfile });
         return new Map(found.map(user => [user.id, user]));
+    }
+
+    /**
+     * A subquery of user ids whose email, username or name contain `term`, for another
+     * module to filter its own rows with (`inArray(col, subquery)`) without importing
+     * the `users` table. It stays one SQL statement, so paging and counts remain exact.
+     */
+    matchingIdsQuery(term: string) {
+        const pattern = `%${term.replace(/[\\%_]/g, "\\$&")}%`;
+        return this.db
+            .select({ id: users.id })
+            .from(users)
+            .where(or(ilike(users.email, pattern), ilike(users.username, pattern), ilike(users.name, pattern)));
+    }
+
+    /** Invalidates every access token the user holds, in every tenant. Pass `tx` to land it with a larger change. */
+    async bumpTokenVersion(id: string, tx?: DbClient): Promise<void> {
+        await (tx ?? this.db)
+            .update(users)
+            .set({ tokenVersion: sql`${users.tokenVersion} + 1` })
+            .where(eq(users.id, id));
     }
 
     async findActiveById(id: string): Promise<UserWithProfile | null> {
@@ -266,6 +287,19 @@ export class UsersService {
 
     restore(id: string): Promise<UserWithProfile> {
         return this.updateUser(id, { deletedAt: null });
+    }
+
+    /**
+     * Hard-deletes an account that never proved its email — the placeholder an owner
+     * invitation creates. Refuses (returns false) once the address is verified, so a
+     * person who has actually used the account can never be removed this way.
+     */
+    async deleteIfUnverified(id: string, tx?: DbClient): Promise<boolean> {
+        const deleted = await (tx ?? this.db)
+            .delete(users)
+            .where(and(eq(users.id, id), isNull(users.emailVerifiedAt)))
+            .returning({ id: users.id });
+        return deleted.length > 0;
     }
 
     /**

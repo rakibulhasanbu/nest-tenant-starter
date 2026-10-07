@@ -8,6 +8,7 @@ import { ZodValidationPipe } from "nestjs-zod";
 import { validateEnv, type Env } from "@/config/env.schema.js";
 import { DrizzleModule } from "@nestjs/drizzle";
 import { drizzle } from "drizzle-orm/node-postgres";
+import { currentTenantStore } from "@/common/tenant/tenant-context.js";
 import { TenantAwarePool } from "@/database/tenant-aware-pool.js";
 import { relations } from "@/database/schema/relations.js";
 import { TenantContextModule } from "@/common/tenant/tenant-context.module.js";
@@ -22,6 +23,7 @@ import { AdminUsersModule } from "@/modules/admin/users/admin-users.module.js";
 import { AdminRolesModule } from "@/modules/admin/roles/admin-roles.module.js";
 import { TenantsModule } from "@/modules/tenants/tenants.module.js";
 import { TenantRequestsModule } from "@/modules/tenant-requests/tenant-requests.module.js";
+import { AuditModule } from "@/modules/audit/audit.module.js";
 import { PlatformModule } from "@/modules/platform/platform.module.js";
 import { TenantHostMiddleware } from "@/modules/tenants/tenant-host.middleware.js";
 import { JwtAuthGuard } from "@/common/guards/jwt-auth.guard.js";
@@ -35,9 +37,30 @@ import { PermissionsGuard } from "@/common/guards/permissions.guard.js";
         // injected here.
         ThrottlerModule.forRootAsync({
             imports: [RedisModule],
-            inject: [RedisService],
-            useFactory: (redis: RedisService) => ({
-                throttlers: [{ ttl: 60_000, limit: 60 }],
+            inject: [RedisService, ConfigService],
+            useFactory: (redis: RedisService, config: ConfigService<Env, true>) => ({
+                throttlers: [
+                    // Per signed-in user, or per IP while anonymous. Each route has its own bucket.
+                    {
+                        name: "default",
+                        ttl: 60_000,
+                        limit: config.get("RATE_LIMIT_PER_MINUTE", { infer: true }),
+                        getTracker: req => {
+                            const { userId } = currentTenantStore() ?? {};
+                            return userId ? `user:${userId}` : `ip:${req.ip}`;
+                        },
+                    },
+                    // One shared budget per tenant across every route and user, so one busy tenant
+                    // cannot starve the rest. Only applies once a request belongs to a tenant.
+                    {
+                        name: "tenant",
+                        ttl: 60_000,
+                        limit: config.get("RATE_LIMIT_TENANT_PER_MINUTE", { infer: true }),
+                        skipIf: () => !currentTenantStore()?.tenantId,
+                        getTracker: () => currentTenantStore()?.tenantId ?? "",
+                        generateKey: (_context, tracker, name) => `${name}:${tracker}`,
+                    },
+                ],
                 storage: new RedisThrottlerStorage(redis),
             }),
         }),
@@ -58,6 +81,7 @@ import { PermissionsGuard } from "@/common/guards/permissions.guard.js";
         AuthorizationModule,
         TenantsModule,
         PlatformModule,
+        AuditModule,
         TenantRequestsModule,
         HealthModule,
         AuthModule,
@@ -68,12 +92,14 @@ import { PermissionsGuard } from "@/common/guards/permissions.guard.js";
     controllers: [],
     providers: [
         { provide: APP_PIPE, useClass: ZodValidationPipe },
-        { provide: APP_GUARD, useClass: ThrottlerGuard },
         // Order matters: JwtAuthGuard proves identity and puts the token claims on
         // the request; PermissionsGuard then resolves the real permission set and
-        // authorizes against it.
+        // authorizes against it, and records the user and tenant. The throttler runs
+        // last so it can count per user and per tenant — a request that fails
+        // authentication is rejected before it is counted.
         { provide: APP_GUARD, useClass: JwtAuthGuard },
         { provide: APP_GUARD, useClass: PermissionsGuard },
+        { provide: APP_GUARD, useClass: ThrottlerGuard },
     ],
 })
 export class AppModule implements NestModule {

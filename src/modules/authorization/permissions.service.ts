@@ -6,9 +6,9 @@ import { TenantContext } from "@/common/tenant/tenant-context.js";
 import type { Database, DbClient } from "@/database/database.type.js";
 import { membershipRoles } from "@/database/schema/authorization.js";
 import { tenantMemberships } from "@/database/schema/tenants.js";
-import { users } from "@/database/schema/users.js";
 import { PermissionsCacheService } from "@/modules/authorization/permissions-cache.service.js";
 import type { PlatformPrincipal, ResolvedPrincipal } from "@/modules/authorization/resolved-principal.type.js";
+import { UsersService } from "@/modules/users/users.service.js";
 
 /**
  * Turns (tenant, user) into the permission set the guard authorizes against.
@@ -28,6 +28,7 @@ export class PermissionsService {
         @InjectDrizzle() private readonly db: Database,
         private readonly cache: PermissionsCacheService,
         private readonly tenantContext: TenantContext,
+        private readonly usersService: UsersService,
     ) {}
 
     async resolve(tenantId: string, userId: string): Promise<ResolvedPrincipal | null> {
@@ -114,10 +115,7 @@ export class PermissionsService {
 
     /** Kills every existing session in every tenant — for password changes and global logout. */
     async bumpTokenVersion(userId: string, tx?: DbClient): Promise<void> {
-        await (tx ?? this.db)
-            .update(users)
-            .set({ tokenVersion: sql`${users.tokenVersion} + 1` })
-            .where(eq(users.id, userId));
+        await this.usersService.bumpTokenVersion(userId, tx);
         await this.cache.invalidateUser(userId);
     }
 

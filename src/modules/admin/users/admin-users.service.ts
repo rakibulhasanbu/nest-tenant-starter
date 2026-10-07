@@ -5,14 +5,20 @@ import {
     Injectable,
     NotFoundException,
 } from "@nestjs/common";
+import { EventEmitter2 } from "@nestjs/event-emitter";
 import { ROLE_SLUGS } from "@/common/authorization/role-templates.constant.js";
 import type { AuthenticatedUser } from "@/common/types/authenticated-request.type.js";
 import { paginate } from "@/common/utils/pagination.util.js";
-import type { Role } from "@/database/schema/authorization.js";
 import { MembershipStatus } from "@/database/schema/enums.js";
 import { AuthService } from "@/modules/auth/auth.service.js";
 import { TokensService } from "@/modules/auth/tokens.service.js";
+import {
+    AccessEvents,
+    type MembershipStatusChangedEvent,
+    type RolesAssignedEvent,
+} from "@/modules/authorization/access.events.js";
 import { PermissionsService } from "@/modules/authorization/permissions.service.js";
+import type { Role } from "@/modules/authorization/role.types.js";
 import type { AssignRolesInput } from "@/modules/admin/users/dto/assign-roles.schema.js";
 import type { InviteUserInput } from "@/modules/admin/users/dto/invite-user.schema.js";
 import type { ListUsersInput } from "@/modules/admin/users/dto/list-users.schema.js";
@@ -35,6 +41,7 @@ export class AdminUsersService {
         private readonly tokensService: TokensService,
         private readonly authService: AuthService,
         private readonly permissionsService: PermissionsService,
+        private readonly events: EventEmitter2,
     ) {}
 
     async list(actor: AuthenticatedUser, query: ListUsersInput) {
@@ -111,6 +118,13 @@ export class AdminUsersService {
             actor.id,
         );
 
+        this.events.emit(AccessEvents.ROLES_ASSIGNED, {
+            tenantId,
+            actorId: actor.id,
+            userId: user.id,
+            roleSlugs: slugs,
+        } satisfies RolesAssignedEvent);
+
         const updated = await this.membershipsService.get(tenantId, user.id);
         return this.toMemberView(user, updated!);
     }
@@ -140,6 +154,12 @@ export class AdminUsersService {
         // setStatus drops the cached principal, and the guard reads the membership
         // status from it, so the change takes effect on the member's next request.
         await this.membershipsService.setStatus(tenantId, user.id, status);
+        this.events.emit(AccessEvents.MEMBERSHIP_STATUS_CHANGED, {
+            tenantId,
+            actorId: actor.id,
+            userId: user.id,
+            status,
+        } satisfies MembershipStatusChangedEvent);
 
         const updated = await this.membershipsService.get(tenantId, user.id);
         return this.toMemberView(user, updated!);

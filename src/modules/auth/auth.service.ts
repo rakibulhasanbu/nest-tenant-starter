@@ -2,8 +2,6 @@ import {
     BadRequestException,
     ConflictException,
     ForbiddenException,
-    HttpException,
-    HttpStatus,
     Inject,
     Injectable,
     NotFoundException,
@@ -18,7 +16,7 @@ import { ROLE_SLUGS } from "@/common/authorization/role-templates.constant.js";
 import { resolveDeviceInfo } from "@/common/utils/device.util.js";
 import type { Env } from "@/config/env.schema.js";
 import { AuthProvider, EmailTokenType, MembershipStatus, TenantStatus, UserStatus } from "@/database/schema/enums.js";
-import type { Tenant } from "@/database/schema/tenants.js";
+import type { Tenant } from "@/modules/tenants/tenant.types.js";
 import { EMAIL_SENDER, type EmailSender } from "@/integrations/email/email-sender.interface.js";
 import { EmailTokensService } from "@/modules/auth/email-tokens.service.js";
 import { GoogleAuthService } from "@/modules/auth/google-auth.service.js";
@@ -29,6 +27,7 @@ import type { SigninInput } from "@/modules/auth/dto/signin.schema.js";
 import { TokensService } from "@/modules/auth/tokens.service.js";
 import { UsersService, type UserWithProfile } from "@/modules/users/users.service.js";
 import { PermissionsService } from "@/modules/authorization/permissions.service.js";
+import { TenantInvitationsService } from "@/modules/tenant-invitations/tenant-invitations.service.js";
 import { MembershipsService } from "@/modules/tenants/memberships.service.js";
 import { TenantsService } from "@/modules/tenants/tenants.service.js";
 import { toPublicUser, type PublicUser } from "@/modules/users/users.mapper.js";
@@ -92,6 +91,7 @@ export class AuthService {
         @Inject(EMAIL_SENDER) private readonly emailSender: EmailSender,
         private readonly tenantsService: TenantsService,
         private readonly membershipsService: MembershipsService,
+        private readonly invitationsService: TenantInvitationsService,
     ) {}
 
     /** Lazily built once — see burnPasswordComparison. */
@@ -310,62 +310,64 @@ export class AuthService {
         context: LoginContext,
         explicitDevice?: { deviceType?: string; deviceName?: string },
     ) {
-        return this.redeemPasswordCode(
-            EmailTokenType.RESET_PASSWORD,
-            "Invalid or expired reset code",
-            email,
-            code,
-            newPassword,
-            context,
-            explicitDevice,
-        );
-    }
-
-    /** Completes a tenant-owner invite: the emailed code proves the address, the new password is their first. Signs them in. */
-    async acceptInvite(
-        email: string,
-        code: string,
-        newPassword: string,
-        context: LoginContext,
-        explicitDevice?: { deviceType?: string; deviceName?: string },
-    ) {
-        return this.redeemPasswordCode(
-            EmailTokenType.INVITE,
-            "Invalid or expired invitation code",
-            email,
-            code,
-            newPassword,
-            context,
-            explicitDevice,
-        );
-    }
-
-    private async redeemPasswordCode(
-        type: EmailTokenType,
-        failureMessage: string,
-        email: string,
-        code: string,
-        newPassword: string,
-        context: LoginContext,
-        explicitDevice?: { deviceType?: string; deviceName?: string },
-    ) {
         const user = await this.usersService.findByEmail(email);
-        if (!user || !this.isReachableAccount(user) || !(await this.emailTokensService.consume(user.id, type, code))) {
+        if (
+            !user ||
+            !this.isReachableAccount(user) ||
+            !(await this.emailTokensService.consume(user.id, EmailTokenType.RESET_PASSWORD, code))
+        ) {
             // Deliberately the same error as a bad code: a suspended account must
             // not be able to tell its suspension apart from a wrong code.
-            throw new BadRequestException(failureMessage);
+            throw new BadRequestException("Invalid or expired reset code");
         }
 
+        return this.setFirstPasswordAndSignIn(user.id, await argon2.hash(newPassword), context, explicitDevice);
+    }
+
+    /**
+     * Completes a tenant-owner invitation: the emailed link token proves the address,
+     * the new password is their first, and they land in the tenant the link was for.
+     */
+    async acceptInvite(
+        token: string,
+        newPassword: string,
+        context: LoginContext,
+        explicitDevice?: { deviceType?: string; deviceName?: string },
+    ) {
+        // Hash before spending the link, so a slow hash can never leave a spent link behind.
         const passwordHash = await argon2.hash(newPassword);
-        await this.usersService.setPassword(user.id, passwordHash);
-        await this.usersService.markEmailVerified(user.id);
-        await this.tokensService.revokeAllRefreshTokens(user.id);
+        const { userId, tenant } = await this.invitationsService.accept(token);
+
+        const user = await this.usersService.findByIdOrThrow(userId);
+        if (!this.isReachableAccount(user)) {
+            throw new BadRequestException("Invalid or expired invitation");
+        }
+
+        // The link names the tenant, so the host the request happened to arrive on must not decide it.
+        const target: TenantTarget = { host: { kind: "apex", tenant: null }, tenantSlug: tenant.slug };
+        return this.setFirstPasswordAndSignIn(user.id, passwordHash, { ...context, target }, explicitDevice);
+    }
+
+    private async setFirstPasswordAndSignIn(
+        userId: string,
+        passwordHash: string,
+        context: LoginContext,
+        explicitDevice?: { deviceType?: string; deviceName?: string },
+    ) {
+        await this.usersService.setPassword(userId, passwordHash);
+        await this.usersService.markEmailVerified(userId);
+        await this.tokensService.revokeAllRefreshTokens(userId);
         // Refresh tokens are revoked above, but access tokens already in the wild
         // stay signature-valid until they expire — bumping tokenVersion kills those too.
-        await this.permissionsService.bumpTokenVersion(user.id);
+        await this.permissionsService.bumpTokenVersion(userId);
 
-        const refreshed = await this.usersService.findByIdOrThrow(user.id);
+        const refreshed = await this.usersService.findByIdOrThrow(userId);
         return this.startSession(refreshed, context, explicitDevice);
+    }
+
+    /** A lost or lapsed invitation link, asked for by the invitee. The answer never reveals whether one exists. */
+    async resendInvite(email: string): Promise<void> {
+        await this.invitationsService.resendForEmail(email);
     }
 
     async changePassword(userId: string, currentPassword: string, newPassword: string): Promise<void> {
@@ -607,49 +609,6 @@ export class AuthService {
 
         const member = await this.membershipsService.get(tenantId, user.id);
         return toPublicUser(user, member?.roleIds ?? []);
-    }
-
-    /**
-     * Finds or creates the account that will own a tenant the super admin is
-     * about to create. A new address gets an unusable placeholder password until
-     * the invite is accepted; `isNew` tells the caller which email to send.
-     */
-    async prepareTenantOwner(email: string): Promise<{ user: UserWithProfile; isNew: boolean }> {
-        const existing = await this.usersService.findByEmail(email);
-
-        if (existing?.deletedAt) {
-            throw new ConflictException(
-                "This address belongs to an account awaiting deletion — its owner must reactivate it, or the grace period must run out first",
-            );
-        }
-        if (existing) {
-            return { user: existing, isNew: false };
-        }
-
-        const user = await this.usersService.createUser({ email, passwordHash: await argon2.hash(randomUUID()) });
-        return { user, isNew: true };
-    }
-
-    /** Emails the owner their invitation code. Throws while the previous one is inside its resend cooldown. */
-    async sendTenantOwnerInvite(user: { id: string; email: string }, tenant: Tenant): Promise<void> {
-        const issued = await this.emailTokensService.issueInviteToken(user.id);
-        if (!issued) {
-            throw new HttpException(
-                {
-                    code: "INVITE_RESEND_COOLDOWN",
-                    message: "An invitation was just sent — wait a minute before resending",
-                },
-                HttpStatus.TOO_MANY_REQUESTS,
-            );
-        }
-
-        await this.emailSender.sendTenantOwnerInvite({
-            to: user.email,
-            tenantName: tenant.name,
-            url: this.tenantsService.urlFor(tenant.slug),
-            code: issued.code,
-            expiresAt: issued.expiresAt,
-        });
     }
 
     /**

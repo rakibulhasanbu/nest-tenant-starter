@@ -74,7 +74,24 @@ const baseEnvSchema = z.object({
     PASSWORD_RESET_TTL_MINUTES: z.coerce.number().default(5),
     DELETE_ACCOUNT_OTP_TTL_MINUTES: z.coerce.number().default(5),
     REACTIVATE_ACCOUNT_OTP_TTL_MINUTES: z.coerce.number().default(5),
-    TENANT_INVITE_TTL_DAYS: z.coerce.number().default(3),
+    /** How long an owner-invite link stays valid. Each reminder or resend issues a fresh link with a full lifetime. */
+    TENANT_INVITE_TTL_DAYS: z.coerce.number().default(7),
+    TENANT_INVITE_REMINDER_AFTER_DAYS: z.coerce.number().default(3),
+    TENANT_INVITE_REMINDER_MAX: z.coerce.number().int().default(2),
+    /** An invite still unaccepted this long after it was created is cleaned up (tenant + placeholder account removed). */
+    TENANT_INVITE_ABANDON_DAYS: z.coerce.number().default(14),
+
+    /** Registration requests waiting on the super admin: nudge after this many days, at most MAX times. */
+    TENANT_REQUEST_REMINDER_AFTER_DAYS: z.coerce.number().default(3),
+    TENANT_REQUEST_REMINDER_MAX: z.coerce.number().int().default(2),
+    TENANT_REQUEST_REJECTED_RETENTION_DAYS: z.coerce.number().default(90),
+
+    /** "json" prints one JSON object per line (for log shippers); "text" is for a terminal. */
+    LOG_FORMAT: z.enum(["text", "json"]).default("text"),
+
+    /** Requests per minute: per user (or per IP when anonymous), and one shared budget for a whole tenant. */
+    RATE_LIMIT_PER_MINUTE: z.coerce.number().int().default(60),
+    RATE_LIMIT_TENANT_PER_MINUTE: z.coerce.number().int().default(600),
 
     LOGIN_MAX_ATTEMPTS: z.coerce.number().default(5),
     LOGIN_LOCKOUT_MINUTES: z.coerce.number().default(15),

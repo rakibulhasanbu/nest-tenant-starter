@@ -2,6 +2,7 @@ import { VersioningType } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import type { NestExpressApplication } from "@nestjs/platform-express";
 import helmet from "helmet";
+import { ContextAwareLogger } from "@/common/logging/context-aware.logger.js";
 import { AllExceptionsFilter } from "@/common/filters/all-exceptions.filter.js";
 import { TransformResponseInterceptor } from "@/common/interceptors/transform-response.interceptor.js";
 import { buildCorsOptions } from "@/config/cors.config.js";
@@ -15,6 +16,11 @@ import type { Env } from "@/config/env.schema.js";
  */
 export function configureApp(app: NestExpressApplication): NestExpressApplication {
     const configService = app.get<ConfigService<Env, true>>(ConfigService);
+
+    // The test runner keeps Nest's own (silent) logger; real runs tag every line with request, tenant and user.
+    if (configService.get("NODE_ENV", { infer: true }) !== "test") {
+        app.useLogger(new ContextAwareLogger({ json: configService.get("LOG_FORMAT", { infer: true }) === "json" }));
+    }
 
     // Must be set before anything reads `req.ip` — the throttler keys on it and
     // refresh tokens record it against the session.

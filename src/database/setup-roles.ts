@@ -51,6 +51,13 @@ async function main() {
             `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO ${quotedRole}`,
         );
 
+        // The audit trail is append-only for the application: it may add rows and read them, never change or remove one.
+        // (Foreign-key actions such as ON DELETE CASCADE run as the table owner and are unaffected.)
+        const hasAudit = await admin.query("select to_regclass('public.audit_logs') as t");
+        if (hasAudit.rows[0]?.t) {
+            await admin.query(`REVOKE UPDATE, DELETE, TRUNCATE ON audit_logs FROM ${quotedRole}`);
+        }
+
         console.log(`Application role ready: ${role} (no superuser, no BYPASSRLS) on ${database}`);
     } finally {
         await admin.end();

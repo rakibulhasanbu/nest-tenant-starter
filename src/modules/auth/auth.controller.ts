@@ -16,6 +16,7 @@ import { ForgotPasswordDto } from "@/modules/auth/dto/forgot-password.schema.js"
 import { ReactivateAccountDto } from "@/modules/auth/dto/reactivate-account.schema.js";
 import { ResetPasswordDto } from "@/modules/auth/dto/reset-password.schema.js";
 import { AcceptInviteDto } from "@/modules/auth/dto/accept-invite.schema.js";
+import { ResendInviteDto } from "@/modules/auth/dto/resend-invite.schema.js";
 import { ChangePasswordDto } from "@/modules/auth/dto/change-password.schema.js";
 import { GoogleLoginDto } from "@/modules/auth/dto/google-login.schema.js";
 import { SetPasswordDto } from "@/modules/auth/dto/set-password.schema.js";
@@ -164,10 +165,19 @@ export class AuthController {
     @HttpCode(HttpStatus.OK)
     @Post("accept-invite")
     acceptInvite(@Body() dto: AcceptInviteDto, @Req() req: Request) {
-        return this.authService.acceptInvite(dto.email, dto.code, dto.password, loginContext(req, dto.tenantSlug), {
+        return this.authService.acceptInvite(dto.token, dto.password, loginContext(req), {
             deviceType: dto.deviceType,
             deviceName: dto.deviceName,
         });
+    }
+
+    /** Always 204, whether or not the address has a pending invitation. */
+    @Public()
+    @Throttle({ default: { limit: 3, ttl: 60_000 } })
+    @HttpCode(HttpStatus.NO_CONTENT)
+    @Post("resend-invite")
+    async resendInvite(@Body() dto: ResendInviteDto) {
+        await this.authService.resendInvite(dto.email);
     }
 
     @Public()

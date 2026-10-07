@@ -1,4 +1,4 @@
-import { date, index, jsonb, pgTable, text, uniqueIndex } from "drizzle-orm/pg-core";
+import { date, index, integer, jsonb, pgTable, text, uniqueIndex } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { TenantRequestStatus, tenantRequestStatusEnum } from "@/database/schema/enums.js";
@@ -32,6 +32,10 @@ export const tenantRegistrationRequests = pgTable(
         reviewedAt: timestamptz("reviewed_at"),
         /** Set once the super admin has created the tenant for this request. */
         tenantId: text("tenant_id").references(() => tenants.id, { onDelete: "set null" }),
+
+        /** Reminders sent to the super admin for the current stage; reset when the stage changes. */
+        reminderCount: integer("reminder_count").notNull().default(0),
+        lastRemindedAt: timestamptz("last_reminded_at"),
 
         createdAt: createdAtColumn(),
         updatedAt: updatedAtColumn(),

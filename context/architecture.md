@@ -27,14 +27,37 @@ Modular monolith: one deployable, hard module boundaries, so a module can be cut
 - Tenant comes only from the access-token `tenantId` claim. `PermissionsGuard` puts it in `TenantContext` (`AsyncLocalStorage`, `src/common/tenant/tenant-context.ts`); `TenantAwarePool` stamps every connection with it (`app.tenant_id`) so RLS enforces it. Never trust a client-sent tenant id on authenticated routes.
 - No tenant in scope = no tenant-owned rows visible (fail closed). Code that legitimately crosses tenants uses `tenantContext.runAsSystem(...)` (signin listing memberships, platform work); code that works for a specific tenant outside a request uses `tenantContext.runAs(tenantId, ...)`. Both await the callback *inside* the scope — Drizzle queries are lazy, so a query returned un-awaited from the scope would run under the wrong tenant.
 - Each tenant has a subdomain (`<slug>.<APP_ROOT_DOMAIN>`), resolved by `TenantHostMiddleware`. On a tenant host the host's tenant must equal the token's `tenantId`, else 403 `TENANT_MISMATCH`. Apex/reserved hosts (mobile, `api.`) accept any tenant token. The platform host (`<PLATFORM_SUBDOMAIN>.<root>`) accepts only the super admin.
+- Tenant onboarding mode (`platform_settings.tenantOnboardingMode`, super admin toggle): `SELF_SIGNUP` (below) or `ADMIN_ONLY` — no self signup; a prospect files a registration request, the super admin approves it, creates the tenant and invites the owner (`tenant-requests`, `tenant-invitations`, `platform` modules).
 - Signup creates a tenant. `platform_settings.requireTenantApproval` (super admin toggle) decides `ACTIVE` vs `PENDING_APPROVAL` *at that moment*; flipping it later never touches existing tenants.
 - Exactly one platform user: the super admin (`platform_admins`, fixed `PLATFORM_PERMISSIONS`, not a role). All roles belong to a tenant; templates live in `role-templates.constant.ts` and are copied into each new tenant.
 - Users are global identities. A tenant admin manages *memberships* (roles, suspension, sessions in that tenant) and can never edit, restore or delete the account itself.
 - A tenant always keeps at least one `owner`.
-- A module owns its tables. Another module must not import its `@/database/schema/*` tables or query them — call its exported service instead. (`tenants` + `authorization` are one "access" context and share tables.)
+- A module owns its tables. Another module must not import its `@/database/schema/*` tables (value *or* type) or query them — call its exported service instead. Enforced by `no-restricted-imports` overrides in `.oxlintrc.json` (`pnpm lint`). Contexts that share tables:
+  - **identity** = `users` + `auth` modules → `schema/users.ts`, `schema/auth.ts`
+  - **access** = `tenants` + `authorization` modules → `schema/tenants.ts`, `schema/authorization.ts`
+  - `tenant-requests` → `schema/tenant-requests.ts`; `tenant-invitations` → `schema/tenant-invitations.ts`; `audit` → `schema/audit-logs.ts`
+  - Shared vocabulary anyone may import: `schema/enums.ts`, `timestamps.ts`, `rls.ts`, `relations.ts`, `database.type.ts`.
+  - A module that must name another's row type imports it from that module's `*.types.ts` (`tenants/tenant.types.ts`, `authorization/role.types.ts`).
+  - Filtering another context's rows by a user attribute: ask its service for a subquery (`UsersService.matchingIdsQuery`) and use `inArray(...)` — never join its table.
 - Cross-module references are IDs only (`tenantId`, `userId`). Side effects go through domain events (`tenant.created`, `tenant.approved`, ... in `modules/tenants/tenant.events.ts`) via `@nestjs/event-emitter` — the contract that would move to a broker.
 - Keep the app stateless; config, cache, queue and email stay behind `integrations/`. Redis keys for tenant data must include the tenant (`perm:{tenantId}:{userId}`).
 - Every new tenant-owned table: `tenantId` column (FK to `tenants`, cascade), `tenantIsolationPolicy(...)`, `.enableRLS()`, index on `tenant_id`.
+
+## Onboarding, reminders and cleanup
+
+- Owner invitation = one `tenant_invitations` row per tenant (global table, no RLS). The emailed link carries a 64-hex random token; only its SHA-256 is stored, so it needs no attempt counter. A reminder or resend **rotates** the token (the old link dies) and restores a full `TENANT_INVITE_TTL_DAYS`.
+- Mails that contain a secret (invite link) are sent by the owning service straight to the email port. Everything else is a domain event, delivered to a `*-notifications.listener.ts` in the owning module. Event payloads never carry secrets.
+- Reminders and cleanup are cron tasks (`*.task.ts`, one per owning module). Reminder jobs **claim** rows with a single `UPDATE … SET reminder_count = reminder_count + 1 … RETURNING`, so several app instances running the same job send each reminder once. A failed mail after a claim is logged, not retried.
+- Cleanup only touches what nobody used: an abandoned invitation removes its tenant and placeholder account only if the invite is still PENDING, the invite created the account, that account never verified its email, and the owner is the tenant's only member. Tenant and account are deleted in one transaction; `tenant.deleted` / `tenant-invitation.abandoned` follow the commit. The request behind it returns to "approved, no tenant" because `tenant_registration_requests.tenant_id` is `ON DELETE SET NULL`.
+- Rejected registration requests are deleted `TENANT_REQUEST_REJECTED_RETENTION_DAYS` (90) after the decision; approved ones are kept.
+- Config (env): `TENANT_INVITE_TTL_DAYS` (7), `TENANT_INVITE_REMINDER_AFTER_DAYS` (3), `TENANT_INVITE_REMINDER_MAX` (2), `TENANT_INVITE_ABANDON_DAYS` (14), `TENANT_REQUEST_REMINDER_AFTER_DAYS` (3), `TENANT_REQUEST_REMINDER_MAX` (2), `TENANT_REQUEST_REJECTED_RETENTION_DAYS` (90).
+
+## Observability, rate limits, audit
+
+- Every request gets an id (`X-Request-Id`, an incoming one is kept only if it is a harmless token). `ContextAwareLogger` (installed in `configureApp`, off under the test runner) adds `requestId`, `tenantId`, `userId` (and `scope=system` for cross-tenant work) to every log line; `LOG_FORMAT=json` makes them JSON fields. They come from the `AsyncLocalStorage` store in `tenant-context.ts`; nested `runAs`/`runAsSystem` scopes keep requestId/userId but never the tenant.
+- Rate limits run **after** authentication (guard order: JWT → permissions → throttler) so they can count per signed-in user (`user:<id>`, else `ip:<ip>`), per route, `RATE_LIMIT_PER_MINUTE`; plus one shared bucket per tenant across all routes and users, `RATE_LIMIT_TENANT_PER_MINUTE`, so one busy tenant cannot starve the others. Requests that fail authentication are rejected before they are counted.
+- Audit log (`audit` module, table `audit_logs`): written **only** by `AuditListener` from domain events — a module that wants something audited emits an event and the listener gets one more handler. Tenant rows carry `tenant_id` (RLS); platform-level rows have `tenant_id` NULL and are invisible to tenants. Append-only: `setup-roles.ts` revokes UPDATE/DELETE/TRUNCATE on it from the app role (run `pnpm db:roles` after migrating). Entries are best-effort (event-driven, never fail the action); a security-critical future action (e.g. super admin "enter tenant") must write its entry in its own transaction instead.
+- Domain events: `tenant.{created,approved,rejected,suspended,reactivated,deleted}`, `membership.added`, `platform.settings-updated` (tenants); `tenant-request.{submitted,approved,rejected,reminder-due}`; `tenant-invitation.{created,accepted,abandoned}`; `membership.{roles-assigned,status-changed}`, `role.{created,updated,deleted}` (authorization, `access.events.ts`).
 
 ## API contract (the clients mirror this — changing it breaks them)
 
@@ -81,6 +104,15 @@ Error codes the clients act on: `TENANT_NOT_FOUND` (404), `TENANT_MISMATCH`, `PL
 `NO_ORGANIZATION` (all 403; the first four state errors also carry `tenants[]`), `TENANT_SLUG_TAKEN` (409),
 `TENANT_SLUG_RESERVED` (400), `TENANT_LIMIT_REACHED` (403), `TENANT_DETAILS_REQUIRED` (400), `SOLE_OWNER` /
 `LAST_OWNER` / `ALREADY_A_MEMBER` / `INVALID_TENANT_TRANSITION` (409/400).
+
+### Onboarding, invitations, audit (added)
+
+- Public: `GET /tenant-requests/config` → `{ mode, selfSignupEnabled, registrationRequestEnabled }`; `POST /tenant-requests` (only in `ADMIN_ONLY`; 403 `REGISTRATION_REQUESTS_DISABLED` otherwise, 409 `TENANT_REQUEST_ALREADY_OPEN`).
+- Super admin (platform host): `GET /platform/tenant-requests[/:id]`, `POST /platform/tenant-requests/:id/{approve,reject}`, `POST /platform/tenants { name, slug, ownerEmail? , requestId? }` (creates an ACTIVE tenant and invites the owner → `{ tenant, owner, inviteSent }`), `POST /platform/tenants/:id/resend-invite` (204; 429 `INVITE_RESEND_COOLDOWN`, 409 `INVITE_ALREADY_ACCEPTED`, 404 `INVITATION_NOT_FOUND`), `GET /platform/audit-logs?tenantId=&platformOnly=&action=&actorId=&from=&to=&page=&limit=`.
+- `POST /auth/accept-invite { token, password, deviceType?, deviceName? }` — the token is the `token` query param of the emailed link `<tenant url>/accept-invite?token=…`; it names the tenant, so no email/slug is sent. Returns a normal session `{ accessToken, refreshToken, tenant }`. Any failure is 400 `Invalid or expired invitation`.
+- `POST /auth/resend-invite { email }` — always 204, whether or not an invitation exists; mails a fresh link if one is pending and the cooldown has passed.
+- `GET /audit-logs?action=&actorId=&from=&to=&page=&limit=` — current tenant's trail, permission `audit:read` (owner has it). `action` is exact (`role.updated`) or a prefix (`role.*`). Paginated `{ data, meta }`.
+- Error codes added: `SELF_SIGNUP_DISABLED` (403), `REGISTRATION_REQUESTS_DISABLED` (403), `TENANT_REQUEST_ALREADY_OPEN` (409), `TENANT_REQUEST_NOT_FOUND` (404), `TENANT_REQUEST_NOT_CONVERTIBLE` / `INVALID_TENANT_REQUEST_TRANSITION` (409), `TENANT_OWNER_NOT_FOUND`/`INVITATION_NOT_FOUND` (404), `INVITE_*` above. Rate-limited requests are 429; the tenant budget adds `Retry-After-tenant`.
 
 Personal details live in the `user_profiles` table and are nested under
 `profile` both on the way out and on `PATCH /users/me`. Flat `dateOfBirth` or
