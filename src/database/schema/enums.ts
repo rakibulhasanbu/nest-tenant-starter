@@ -18,6 +18,7 @@ export const EmailTokenType = {
     RESET_PASSWORD: "RESET_PASSWORD",
     DELETE_ACCOUNT: "DELETE_ACCOUNT",
     REACTIVATE_ACCOUNT: "REACTIVATE_ACCOUNT",
+    INVITE: "INVITE",
 } as const;
 export type EmailTokenType = (typeof EmailTokenType)[keyof typeof EmailTokenType];
 export const emailTokenTypeEnum = pgEnum(
@@ -85,4 +86,26 @@ export type PermissionLevel = (typeof PermissionLevel)[keyof typeof PermissionLe
 export const permissionLevelEnum = pgEnum(
     "permission_level",
     Object.values(PermissionLevel) as [PermissionLevel, ...PermissionLevel[]],
+);
+
+/** How tenants come to exist: users sign up for one themselves, or the super admin creates it and invites the owner. */
+export const TenantOnboardingMode = {
+    SELF_SIGNUP: "SELF_SIGNUP",
+    ADMIN_ONLY: "ADMIN_ONLY",
+} as const;
+export type TenantOnboardingMode = (typeof TenantOnboardingMode)[keyof typeof TenantOnboardingMode];
+export const tenantOnboardingModeEnum = pgEnum(
+    "tenant_onboarding_mode",
+    Object.values(TenantOnboardingMode) as [TenantOnboardingMode, ...TenantOnboardingMode[]],
+);
+
+export const TenantRequestStatus = {
+    PENDING: "PENDING",
+    APPROVED: "APPROVED",
+    REJECTED: "REJECTED",
+} as const;
+export type TenantRequestStatus = (typeof TenantRequestStatus)[keyof typeof TenantRequestStatus];
+export const tenantRequestStatusEnum = pgEnum(
+    "tenant_request_status",
+    Object.values(TenantRequestStatus) as [TenantRequestStatus, ...TenantRequestStatus[]],
 );

@@ -19,7 +19,7 @@ import { buildTenantUrl } from "@/common/tenant/tenant-host.util.js";
 import { toLimitOffset, type PaginationParams } from "@/common/utils/pagination.util.js";
 import type { Env } from "@/config/env.schema.js";
 import type { Database } from "@/database/database.type.js";
-import { TenantStatus } from "@/database/schema/enums.js";
+import { TenantOnboardingMode, TenantStatus } from "@/database/schema/enums.js";
 import { tenantMemberships, tenants, type Tenant } from "@/database/schema/tenants.js";
 import { RedisService } from "@/integrations/redis/redis.service.js";
 import { PermissionsService } from "@/modules/authorization/permissions.service.js";
@@ -111,6 +111,7 @@ export class TenantsService implements OnModuleInit {
     async createForOwner(ownerId: string, input: CreateTenantInput): Promise<Tenant> {
         const owner = await this.usersService.findByIdOrThrow(ownerId);
         const settings = await this.settings.get();
+        this.assertSelfSignupOpen(settings.tenantOnboardingMode);
 
         const owned = await this.db.$count(
             tenants,
@@ -125,8 +126,52 @@ export class TenantsService implements OnModuleInit {
 
         await this.assertSlugAvailable(input.slug);
 
-        const id = randomUUID();
         const status = settings.requireTenantApproval ? TenantStatus.PENDING_APPROVAL : TenantStatus.ACTIVE;
+        const tenant = await this.provision(ownerId, input, { status });
+
+        this.events.emit(TenantEvents.CREATED, {
+            tenant,
+            ownerId,
+            ownerEmail: owner.email,
+        } satisfies TenantCreatedEvent);
+
+        return tenant;
+    }
+
+    /**
+     * The super admin creating a tenant for someone: always ACTIVE (the admin's
+     * own act is the approval) and exempt from the per-user limit and the
+     * onboarding mode, which only govern self signup.
+     */
+    async createByPlatform(ownerId: string, input: CreateTenantInput, adminId: string): Promise<Tenant> {
+        await this.assertSlugAvailable(input.slug);
+        return this.provision(ownerId, input, {
+            status: TenantStatus.ACTIVE,
+            reviewedBy: adminId,
+            reviewedAt: new Date(),
+        });
+    }
+
+    /** Whether new accounts may create their own tenant. Checked before an account is made, so nothing is left half-built. */
+    async assertSelfSignupAllowed(): Promise<void> {
+        this.assertSelfSignupOpen((await this.settings.get()).tenantOnboardingMode);
+    }
+
+    private assertSelfSignupOpen(mode: TenantOnboardingMode): void {
+        if (mode === TenantOnboardingMode.ADMIN_ONLY) {
+            throw new ForbiddenException({
+                code: "SELF_SIGNUP_DISABLED",
+                message: "Organizations are created by invitation only. Submit a registration request instead.",
+            });
+        }
+    }
+
+    private async provision(
+        ownerId: string,
+        input: CreateTenantInput,
+        extra: Pick<typeof tenants.$inferInsert, "status" | "reviewedBy" | "reviewedAt">,
+    ): Promise<Tenant> {
+        const id = randomUUID();
 
         // The tenant row is global, but its roles and membership are RLS-owned, so
         // the whole transaction runs scoped to the tenant being created.
@@ -134,7 +179,7 @@ export class TenantsService implements OnModuleInit {
             this.db.transaction(async tx => {
                 const [created] = await tx
                     .insert(tenants)
-                    .values({ id, slug: input.slug, name: input.name, status, createdBy: ownerId })
+                    .values({ id, slug: input.slug, name: input.name, createdBy: ownerId, ...extra })
                     .returning();
 
                 const roleIds = await this.roleProvisioning.provision(id, tx);
@@ -153,12 +198,6 @@ export class TenantsService implements OnModuleInit {
         );
 
         this.invalidateCache();
-        this.events.emit(TenantEvents.CREATED, {
-            tenant,
-            ownerId,
-            ownerEmail: owner.email,
-        } satisfies TenantCreatedEvent);
-
         return tenant;
     }
 

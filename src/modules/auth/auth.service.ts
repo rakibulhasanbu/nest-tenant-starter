@@ -2,6 +2,8 @@ import {
     BadRequestException,
     ConflictException,
     ForbiddenException,
+    HttpException,
+    HttpStatus,
     Inject,
     Injectable,
     NotFoundException,
@@ -100,6 +102,8 @@ export class AuthService {
      * validated first so a taken subdomain fails before any account exists.
      */
     async signup(input: SignupInput): Promise<{ user: PublicUser; tenant: SessionTenant & { status: TenantStatus } }> {
+        await this.tenantsService.assertSelfSignupAllowed();
+
         const existing = await this.usersService.findByEmail(input.email);
         if (existing?.deletedAt) {
             // The row is still there (grace period), so the unique email would
@@ -306,15 +310,50 @@ export class AuthService {
         context: LoginContext,
         explicitDevice?: { deviceType?: string; deviceName?: string },
     ) {
+        return this.redeemPasswordCode(
+            EmailTokenType.RESET_PASSWORD,
+            "Invalid or expired reset code",
+            email,
+            code,
+            newPassword,
+            context,
+            explicitDevice,
+        );
+    }
+
+    /** Completes a tenant-owner invite: the emailed code proves the address, the new password is their first. Signs them in. */
+    async acceptInvite(
+        email: string,
+        code: string,
+        newPassword: string,
+        context: LoginContext,
+        explicitDevice?: { deviceType?: string; deviceName?: string },
+    ) {
+        return this.redeemPasswordCode(
+            EmailTokenType.INVITE,
+            "Invalid or expired invitation code",
+            email,
+            code,
+            newPassword,
+            context,
+            explicitDevice,
+        );
+    }
+
+    private async redeemPasswordCode(
+        type: EmailTokenType,
+        failureMessage: string,
+        email: string,
+        code: string,
+        newPassword: string,
+        context: LoginContext,
+        explicitDevice?: { deviceType?: string; deviceName?: string },
+    ) {
         const user = await this.usersService.findByEmail(email);
-        if (
-            !user ||
-            !this.isReachableAccount(user) ||
-            !(await this.emailTokensService.consume(user.id, EmailTokenType.RESET_PASSWORD, code))
-        ) {
+        if (!user || !this.isReachableAccount(user) || !(await this.emailTokensService.consume(user.id, type, code))) {
             // Deliberately the same error as a bad code: a suspended account must
             // not be able to tell its suspension apart from a wrong code.
-            throw new BadRequestException("Invalid or expired reset code");
+            throw new BadRequestException(failureMessage);
         }
 
         const passwordHash = await argon2.hash(newPassword);
@@ -438,6 +477,9 @@ export class AuthService {
             await this.emailSender.sendAccountLinked({ to: existingUser.email, provider: "Google" });
             return existingUser;
         }
+
+        // A brand-new Google account would be created together with a tenant.
+        await this.tenantsService.assertSelfSignupAllowed();
 
         if (!newTenant) {
             throw new BadRequestException({
@@ -565,6 +607,49 @@ export class AuthService {
 
         const member = await this.membershipsService.get(tenantId, user.id);
         return toPublicUser(user, member?.roleIds ?? []);
+    }
+
+    /**
+     * Finds or creates the account that will own a tenant the super admin is
+     * about to create. A new address gets an unusable placeholder password until
+     * the invite is accepted; `isNew` tells the caller which email to send.
+     */
+    async prepareTenantOwner(email: string): Promise<{ user: UserWithProfile; isNew: boolean }> {
+        const existing = await this.usersService.findByEmail(email);
+
+        if (existing?.deletedAt) {
+            throw new ConflictException(
+                "This address belongs to an account awaiting deletion — its owner must reactivate it, or the grace period must run out first",
+            );
+        }
+        if (existing) {
+            return { user: existing, isNew: false };
+        }
+
+        const user = await this.usersService.createUser({ email, passwordHash: await argon2.hash(randomUUID()) });
+        return { user, isNew: true };
+    }
+
+    /** Emails the owner their invitation code. Throws while the previous one is inside its resend cooldown. */
+    async sendTenantOwnerInvite(user: { id: string; email: string }, tenant: Tenant): Promise<void> {
+        const issued = await this.emailTokensService.issueInviteToken(user.id);
+        if (!issued) {
+            throw new HttpException(
+                {
+                    code: "INVITE_RESEND_COOLDOWN",
+                    message: "An invitation was just sent — wait a minute before resending",
+                },
+                HttpStatus.TOO_MANY_REQUESTS,
+            );
+        }
+
+        await this.emailSender.sendTenantOwnerInvite({
+            to: user.email,
+            tenantName: tenant.name,
+            url: this.tenantsService.urlFor(tenant.slug),
+            code: issued.code,
+            expiresAt: issued.expiresAt,
+        });
     }
 
     /**

@@ -8,6 +8,10 @@ import type {
     ReactivateAccountMessage,
     ResetPasswordMessage,
     TenantApprovedMessage,
+    TenantOwnerInviteMessage,
+    TenantRequestApprovedMessage,
+    TenantRequestReceivedMessage,
+    TenantRequestRejectedMessage,
     TenantPendingApprovalMessage,
     TenantRejectedMessage,
     VerifyEmailMessage,
@@ -63,5 +67,26 @@ export class ConsoleEmailSender implements EmailSender {
 
     async sendMembershipAdded(message: MembershipAddedMessage): Promise<void> {
         this.logger.log(`[membership-added] to=${message.to} tenant=${message.tenantName} url=${message.url}`);
+    }
+
+    async sendTenantOwnerInvite(message: TenantOwnerInviteMessage): Promise<void> {
+        this.logger.log(
+            `[tenant-owner-invite] to=${message.to} tenant=${message.tenantName} code=${message.code} ` +
+                `url=${message.url} expiresAt=${message.expiresAt.toISOString()}`,
+        );
+    }
+
+    async sendTenantRequestReceived(message: TenantRequestReceivedMessage): Promise<void> {
+        this.logger.log(`[tenant-request-received] to=${message.to} business=${message.businessName}`);
+    }
+
+    async sendTenantRequestApproved(message: TenantRequestApprovedMessage): Promise<void> {
+        this.logger.log(`[tenant-request-approved] to=${message.to} business=${message.businessName}`);
+    }
+
+    async sendTenantRequestRejected(message: TenantRequestRejectedMessage): Promise<void> {
+        this.logger.log(
+            `[tenant-request-rejected] to=${message.to} business=${message.businessName} reason=${message.reason ?? "-"}`,
+        );
     }
 }

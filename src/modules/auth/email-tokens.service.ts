@@ -42,6 +42,14 @@ export class EmailTokensService {
         return this.issue(userId, EmailTokenType.REACTIVATE_ACCOUNT, ttlMinutes * 60 * 1000);
     }
 
+    /** Owner invites live for days, not minutes: the recipient may not open the mail right away. Returns null while a still-valid code is within its resend cooldown. */
+    async issueInviteToken(userId: string): Promise<{ code: string; expiresAt: Date } | null> {
+        const ttlDays = this.configService.get("TENANT_INVITE_TTL_DAYS", { infer: true });
+        const ttlMs = ttlDays * 24 * 60 * 60 * 1000;
+        const code = await this.issue(userId, EmailTokenType.INVITE, ttlMs);
+        return code ? { code, expiresAt: new Date(Date.now() + ttlMs) } : null;
+    }
+
     /** Checks the code for this user+type, tracks failed attempts, and marks it used on success. */
     async consume(userId: string, type: EmailTokenType, code: string): Promise<boolean> {
         const record = await this.find(userId, type);

@@ -57,6 +57,31 @@ export interface MembershipAddedMessage {
     url: string;
 }
 
+/** Sent to a brand-new owner of a tenant the super admin created; the code is redeemed with the password they choose. */
+export interface TenantOwnerInviteMessage {
+    to: string;
+    tenantName: string;
+    url: string;
+    code: string;
+    expiresAt: Date;
+}
+
+export interface TenantRequestReceivedMessage {
+    to: string;
+    businessName: string;
+}
+
+export interface TenantRequestApprovedMessage {
+    to: string;
+    businessName: string;
+}
+
+export interface TenantRequestRejectedMessage {
+    to: string;
+    businessName: string;
+    reason: string | null;
+}
+
 export const EMAIL_SENDER = Symbol("EMAIL_SENDER");
 
 /**
@@ -74,4 +99,8 @@ export interface EmailSender {
     sendTenantApproved(message: TenantApprovedMessage): Promise<void>;
     sendTenantRejected(message: TenantRejectedMessage): Promise<void>;
     sendMembershipAdded(message: MembershipAddedMessage): Promise<void>;
+    sendTenantOwnerInvite(message: TenantOwnerInviteMessage): Promise<void>;
+    sendTenantRequestReceived(message: TenantRequestReceivedMessage): Promise<void>;
+    sendTenantRequestApproved(message: TenantRequestApprovedMessage): Promise<void>;
+    sendTenantRequestRejected(message: TenantRequestRejectedMessage): Promise<void>;
 }

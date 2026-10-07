@@ -74,6 +74,7 @@ const baseEnvSchema = z.object({
     PASSWORD_RESET_TTL_MINUTES: z.coerce.number().default(5),
     DELETE_ACCOUNT_OTP_TTL_MINUTES: z.coerce.number().default(5),
     REACTIVATE_ACCOUNT_OTP_TTL_MINUTES: z.coerce.number().default(5),
+    TENANT_INVITE_TTL_DAYS: z.coerce.number().default(3),
 
     LOGIN_MAX_ATTEMPTS: z.coerce.number().default(5),
     LOGIN_LOCKOUT_MINUTES: z.coerce.number().default(15),

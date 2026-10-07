@@ -15,6 +15,7 @@ import { VerifyEmailDto, ResendVerificationDto } from "@/modules/auth/dto/verify
 import { ForgotPasswordDto } from "@/modules/auth/dto/forgot-password.schema.js";
 import { ReactivateAccountDto } from "@/modules/auth/dto/reactivate-account.schema.js";
 import { ResetPasswordDto } from "@/modules/auth/dto/reset-password.schema.js";
+import { AcceptInviteDto } from "@/modules/auth/dto/accept-invite.schema.js";
 import { ChangePasswordDto } from "@/modules/auth/dto/change-password.schema.js";
 import { GoogleLoginDto } from "@/modules/auth/dto/google-login.schema.js";
 import { SetPasswordDto } from "@/modules/auth/dto/set-password.schema.js";
@@ -153,6 +154,17 @@ export class AuthController {
     @Post("reset-password")
     resetPassword(@Body() dto: ResetPasswordDto, @Req() req: Request) {
         return this.authService.resetPassword(dto.email, dto.code, dto.password, loginContext(req, dto.tenantSlug), {
+            deviceType: dto.deviceType,
+            deviceName: dto.deviceName,
+        });
+    }
+
+    @Public()
+    @Throttle({ default: { limit: 10, ttl: 60_000 } })
+    @HttpCode(HttpStatus.OK)
+    @Post("accept-invite")
+    acceptInvite(@Body() dto: AcceptInviteDto, @Req() req: Request) {
+        return this.authService.acceptInvite(dto.email, dto.code, dto.password, loginContext(req, dto.tenantSlug), {
             deviceType: dto.deviceType,
             deviceName: dto.deviceName,
         });

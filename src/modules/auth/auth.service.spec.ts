@@ -48,7 +48,7 @@ function buildService(user: UserWithProfile | null) {
         permissionsService as never,
         configService as never,
         emailSender as never,
-        {} as never,
+        { assertSelfSignupAllowed: vi.fn().mockResolvedValue(undefined) } as never,
         {} as never,
     );
 

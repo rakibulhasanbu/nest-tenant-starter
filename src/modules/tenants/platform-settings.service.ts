@@ -2,6 +2,7 @@ import { Injectable } from "@nestjs/common";
 import { InjectDrizzle } from "@nestjs/drizzle";
 import { eq } from "drizzle-orm";
 import type { Database } from "@/database/database.type.js";
+import type { TenantOnboardingMode } from "@/database/schema/enums.js";
 import { platformSettings, type PlatformSettings } from "@/database/schema/tenants.js";
 
 const SETTINGS_ROW_ID = 1;
@@ -28,7 +29,11 @@ export class PlatformSettingsService {
     }
 
     async update(
-        patch: { requireTenantApproval?: boolean; maxTenantsPerUser?: number },
+        patch: {
+            tenantOnboardingMode?: TenantOnboardingMode;
+            requireTenantApproval?: boolean;
+            maxTenantsPerUser?: number;
+        },
         actorId: string,
     ): Promise<PlatformSettings> {
         await this.get();

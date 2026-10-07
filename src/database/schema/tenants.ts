@@ -6,6 +6,8 @@ import {
     MembershipStatus,
     tenantIsolationEnum,
     TenantIsolation,
+    tenantOnboardingModeEnum,
+    TenantOnboardingMode,
     tenantStatusEnum,
     TenantStatus,
 } from "@/database/schema/enums.js";
@@ -43,7 +45,11 @@ export const tenants = pgTable(
 /** Single-row table of platform-wide switches, editable only by the super admin. */
 export const platformSettings = pgTable("platform_settings", {
     id: integer("id").primaryKey().default(1),
-    /** When true, new tenants wait in PENDING_APPROVAL until the super admin approves them. */
+    /** SELF_SIGNUP: anyone can sign up and get a tenant. ADMIN_ONLY: tenants come from registration requests and admin invites. */
+    tenantOnboardingMode: tenantOnboardingModeEnum("tenant_onboarding_mode")
+        .notNull()
+        .default(TenantOnboardingMode.SELF_SIGNUP),
+    /** Only applies to SELF_SIGNUP: when true, new tenants wait in PENDING_APPROVAL until the super admin approves them. */
     requireTenantApproval: boolean("require_tenant_approval").notNull().default(true),
     maxTenantsPerUser: integer("max_tenants_per_user").notNull().default(5),
     updatedBy: text("updated_by").references(() => users.id, { onDelete: "set null" }),

@@ -44,6 +44,7 @@ export const PERMISSIONS = {
 
     PLATFORM_TENANT_READ: "platform:tenant:read",
     PLATFORM_TENANT_REVIEW: "platform:tenant:review",
+    PLATFORM_TENANT_CREATE: "platform:tenant:create",
     PLATFORM_TENANT_SUSPEND: "platform:tenant:suspend",
     PLATFORM_SETTINGS_READ: "platform:settings:read",
     PLATFORM_SETTINGS_WRITE: "platform:settings:write",
@@ -55,6 +56,7 @@ export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
 export const PLATFORM_PERMISSIONS: readonly PermissionKey[] = [
     PERMISSIONS.PLATFORM_TENANT_READ,
     PERMISSIONS.PLATFORM_TENANT_REVIEW,
+    PERMISSIONS.PLATFORM_TENANT_CREATE,
     PERMISSIONS.PLATFORM_TENANT_SUSPEND,
     PERMISSIONS.PLATFORM_SETTINGS_READ,
     PERMISSIONS.PLATFORM_SETTINGS_WRITE,
@@ -171,7 +173,15 @@ export const PERMISSION_CATALOG: readonly PermissionDefinition[] = [
         resource: "platform-tenant",
         action: "review",
         scope: "any",
-        description: "Approve or reject tenants awaiting approval",
+        description: "Approve or reject tenants and registration requests awaiting approval",
+    },
+    {
+        key: PERMISSIONS.PLATFORM_TENANT_CREATE,
+        level: "platform",
+        resource: "platform-tenant",
+        action: "create",
+        scope: "any",
+        description: "Create a tenant and invite its owner",
     },
     {
         key: PERMISSIONS.PLATFORM_TENANT_SUSPEND,

@@ -12,6 +12,7 @@ import { configureApp } from "@/config/configure-app.js";
 import type { Database } from "@/database/database.type.js";
 import { TenantStatus, UserStatus } from "@/database/schema/enums.js";
 import { relations } from "@/database/schema/relations.js";
+import { tenantRegistrationRequests } from "@/database/schema/tenant-requests.js";
 import { platformSettings, tenants } from "@/database/schema/tenants.js";
 import { users } from "@/database/schema/users.js";
 import { RedisService } from "@/integrations/redis/redis.service.js";
@@ -74,12 +75,14 @@ export async function shutdown(h: Harness | undefined): Promise<void> {
     if (!h) return;
     // Users first: deleting them cascades their memberships and role assignments, which
     // is what lets the tenants (and their roles) go afterwards.
+    await h.admin.delete(tenantRegistrationRequests).where(like(tenantRegistrationRequests.email, `${PREFIX}%`));
     await h.admin.delete(users).where(like(users.email, `${PREFIX}%`));
     await h.admin.delete(tenants).where(like(tenants.slug, `${PREFIX}%`));
     if (h.originalSettings) {
         await h.admin
             .update(platformSettings)
             .set({
+                tenantOnboardingMode: h.originalSettings.tenantOnboardingMode,
                 requireTenantApproval: h.originalSettings.requireTenantApproval,
                 maxTenantsPerUser: h.originalSettings.maxTenantsPerUser,
             })

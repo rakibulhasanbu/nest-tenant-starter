@@ -21,6 +21,7 @@ import { UsersModule } from "@/modules/users/users.module.js";
 import { AdminUsersModule } from "@/modules/admin/users/admin-users.module.js";
 import { AdminRolesModule } from "@/modules/admin/roles/admin-roles.module.js";
 import { TenantsModule } from "@/modules/tenants/tenants.module.js";
+import { TenantRequestsModule } from "@/modules/tenant-requests/tenant-requests.module.js";
 import { PlatformModule } from "@/modules/platform/platform.module.js";
 import { TenantHostMiddleware } from "@/modules/tenants/tenant-host.middleware.js";
 import { JwtAuthGuard } from "@/common/guards/jwt-auth.guard.js";
@@ -57,6 +58,7 @@ import { PermissionsGuard } from "@/common/guards/permissions.guard.js";
         AuthorizationModule,
         TenantsModule,
         PlatformModule,
+        TenantRequestsModule,
         HealthModule,
         AuthModule,
         UsersModule,
