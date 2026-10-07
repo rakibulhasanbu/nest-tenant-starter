@@ -31,18 +31,29 @@
 $ pnpm install
 ```
 
-Copy the environment file, create the schema, and seed it. `db:push` applies the
-Drizzle schema (`src/database/schema`) straight to the database; for versioned
-migrations use `db:generate` then `db:migrate` instead.
+Copy the environment file, create the database, then run the one-shot setup. It
+applies the migrations as the table owner (`DATABASE_ADMIN_URL`), creates the
+restricted `app_user` role the app runs as (row-level security only binds roles
+that are neither superuser nor table owner), and seeds the permission catalog,
+platform settings and the single super admin.
 
 ```bash
 $ cp .env.example .env
-$ pnpm run db:push
-$ pnpm run db:seed
+$ createdb nest_tenant_starter        # or: docker compose up -d (creates it)
+$ pnpm run db:setup                   # migrate + db:roles + db:seed
+$ pnpm run db:seed -- --demo          # optional: an ACTIVE "demo-org" tenant for local poking
 ```
 
 Requires a running PostgreSQL and Redis — the e2e suite boots the real
-application graph and needs both.
+application graph and needs both. After changing the schema: `pnpm db:generate`
+then `pnpm db:migrate`.
+
+### Multi-tenancy in development
+
+Tenants live at `<slug>.<APP_ROOT_DOMAIN>` (`localhost` by default, so
+`acme.localhost:3000` resolves with no DNS) and the super admin console at
+`admin.localhost`. See `context/multi-tenant-plan.md` and the multi-tenancy rules
+in `context/architecture.md`.
 
 ## Compile and run the project
 

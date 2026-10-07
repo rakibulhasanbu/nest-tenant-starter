@@ -7,20 +7,26 @@ import { generateOpaqueToken, hashToken } from "@/common/utils/token.util.js";
 import type { DeviceInfo } from "@/common/utils/device.util.js";
 import type { Env } from "@/config/env.schema.js";
 import { InjectDrizzle } from "@nestjs/drizzle";
-import { and, eq, isNull, lt, or } from "drizzle-orm";
+import { and, eq, gt, isNotNull, isNull, lt, or } from "drizzle-orm";
 import type { Database } from "@/database/database.type.js";
-import { refreshTokens, type RefreshToken } from "@/database/schema/auth.js";
+import { exchangeCodes, refreshTokens, type RefreshToken } from "@/database/schema/auth.js";
 import type { User } from "@/database/schema/users.js";
 
 /**
- * Deliberately carries no roles or permissions — only identity plus two version
- * markers the guard re-validates on every request. Authorization data baked into
- * a token cannot be revoked before it expires; a version number can.
+ * Deliberately carries no roles or permissions — only identity, the tenant the
+ * session is for, and two version markers the guard re-validates on every
+ * request. Authorization data baked into a token cannot be revoked before it
+ * expires; a version number can.
  */
 export interface AccessTokenPayload {
     sub: string;
     email: string;
-    /** Snapshot of User.permVersion at issue time. Stale value ⇒ the user's access changed. */
+    /**
+     * The tenant this session acts in — the *only* tenant authority the guard trusts.
+     * `null` marks a platform (super admin) session.
+     */
+    tenantId: string | null;
+    /** Snapshot of the membership's permVersion at issue time (0 for platform sessions). Stale value ⇒ access changed. */
     permVersion: number;
     /** Snapshot of User.tokenVersion at issue time. Stale value ⇒ the session was killed. */
     tokenVersion: number;
@@ -80,6 +86,7 @@ export class TokensService {
     /** Omitting `familyId` starts a new chain — i.e. a fresh login rather than a rotation. */
     async issueRefreshToken(
         userId: string,
+        tenantId: string | null,
         context: { userAgent?: string; ipAddress?: string; device: DeviceInfo },
         familyId?: string,
     ): Promise<IssuedRefreshToken> {
@@ -89,6 +96,7 @@ export class TokensService {
 
         await this.db.insert(refreshTokens).values({
             userId,
+            tenantId,
             tokenHash,
             familyId: family,
             userAgent: context.userAgent,
@@ -143,6 +151,15 @@ export class TokensService {
         return claimed.length === 0 ? { outcome: "invalid" } : { outcome: "valid", record };
     }
 
+    /** Reads a live refresh token's tenant without spending it (see AuthService.refresh). */
+    async peekRefreshToken(rawToken: string): Promise<{ tenantId: string | null } | null> {
+        const record = await this.db.query.refreshTokens.findFirst({
+            where: { tokenHash: hashToken(rawToken), revokedAt: { isNull: true }, expiresAt: { gt: new Date() } },
+            columns: { tenantId: true },
+        });
+        return record ?? null;
+    }
+
     /** Drops an entire rotation chain — every token descended from one login. */
     async revokeFamily(familyId: string): Promise<void> {
         await this.db
@@ -159,27 +176,114 @@ export class TokensService {
             .where(and(eq(refreshTokens.tokenHash, tokenHash), isNull(refreshTokens.revokedAt)));
     }
 
-    async revokeAllRefreshTokens(userId: string): Promise<void> {
-        await this.db
-            .update(refreshTokens)
-            .set({ revokedAt: new Date() })
-            .where(and(eq(refreshTokens.userId, userId), isNull(refreshTokens.revokedAt)));
-    }
-
-    listActiveSessions(userId: string) {
-        return this.db.query.refreshTokens.findMany({
-            where: { userId, revokedAt: { isNull: true }, expiresAt: { gt: new Date() } },
-            orderBy: { lastUsedAt: "desc" },
-        });
-    }
-
-    async revokeSessionById(userId: string, sessionId: string): Promise<void> {
+    /** Revokes every session of the user, or only those in one tenant when `tenantId` is given. */
+    async revokeAllRefreshTokens(userId: string, tenantId?: string): Promise<void> {
         await this.db
             .update(refreshTokens)
             .set({ revokedAt: new Date() })
             .where(
-                and(eq(refreshTokens.id, sessionId), eq(refreshTokens.userId, userId), isNull(refreshTokens.revokedAt)),
+                and(
+                    eq(refreshTokens.userId, userId),
+                    tenantId ? eq(refreshTokens.tenantId, tenantId) : undefined,
+                    isNull(refreshTokens.revokedAt),
+                ),
             );
+    }
+
+    /** A user's live sessions across every tenant, or only one tenant's when `tenantId` is given. */
+    listActiveSessions(userId: string, tenantId?: string) {
+        return this.db.query.refreshTokens.findMany({
+            where: {
+                userId,
+                ...(tenantId ? { tenantId } : {}),
+                revokedAt: { isNull: true },
+                expiresAt: { gt: new Date() },
+            },
+            orderBy: { lastUsedAt: "desc" },
+        });
+    }
+
+    async revokeSessionById(userId: string, sessionId: string, tenantId?: string): Promise<void> {
+        await this.db
+            .update(refreshTokens)
+            .set({ revokedAt: new Date() })
+            .where(
+                and(
+                    eq(refreshTokens.id, sessionId),
+                    eq(refreshTokens.userId, userId),
+                    tenantId ? eq(refreshTokens.tenantId, tenantId) : undefined,
+                    isNull(refreshTokens.revokedAt),
+                ),
+            );
+    }
+
+    /**
+     * One-time code that lets a user already signed in on one tenant host start a
+     * session on another (each subdomain is a separate origin). Only the hash is
+     * stored; it is spent on first use.
+     */
+    async issueExchangeCode(userId: string, tenantId: string): Promise<string> {
+        const { token, tokenHash } = generateOpaqueToken();
+        const ttlSeconds = this.configService.get("TENANT_EXCHANGE_TTL_SECONDS", { infer: true });
+
+        await this.db.insert(exchangeCodes).values({
+            userId,
+            tenantId,
+            codeHash: tokenHash,
+            expiresAt: new Date(Date.now() + ttlSeconds * 1000),
+        });
+
+        return token;
+    }
+
+    /** Reads an exchange code's tenant without spending it, so a wrong-host attempt cannot burn a valid code. */
+    async peekExchangeCode(code: string): Promise<{ userId: string; tenantId: string } | null> {
+        const found = await this.db.query.exchangeCodes.findFirst({
+            where: { codeHash: hashToken(code), usedAt: { isNull: true }, expiresAt: { gt: new Date() } },
+            columns: { userId: true, tenantId: true },
+        });
+        return found ?? null;
+    }
+
+    async consumeExchangeCode(code: string): Promise<{ userId: string; tenantId: string } | null> {
+        const [claimed] = await this.db
+            .update(exchangeCodes)
+            .set({ usedAt: new Date() })
+            .where(
+                and(
+                    eq(exchangeCodes.codeHash, hashToken(code)),
+                    isNull(exchangeCodes.usedAt),
+                    gt(exchangeCodes.expiresAt, new Date()),
+                ),
+            )
+            .returning({ userId: exchangeCodes.userId, tenantId: exchangeCodes.tenantId });
+
+        return claimed ?? null;
+    }
+
+    /** Short-lived token proving a password check passed while the user still has to pick one of several tenants. */
+    signTenantSelectionToken(userId: string): string {
+        return this.jwtService.sign(
+            { sub: userId, purpose: "tenant-select" },
+            {
+                secret: this.configService.get("JWT_ACCESS_SECRET", { infer: true }),
+                expiresIn: this.configService.get("TENANT_SELECTION_TTL", { infer: true }),
+            },
+        );
+    }
+
+    verifyTenantSelectionToken(token: string): string {
+        try {
+            const payload = this.jwtService.verify<{ sub: string; purpose: string }>(token, {
+                secret: this.configService.get("JWT_ACCESS_SECRET", { infer: true }),
+            });
+            if (payload.purpose !== "tenant-select") {
+                throw new UnauthorizedException("Invalid tenant selection token");
+            }
+            return payload.sub;
+        } catch {
+            throw new UnauthorizedException("Invalid or expired tenant selection token");
+        }
     }
 
     /** Short-lived token proving a password check passed, so a 2FA code can be requested next without re-authenticating. */
@@ -201,8 +305,12 @@ export class TokensService {
             .delete(refreshTokens)
             .where(or(lt(refreshTokens.expiresAt, new Date()), lt(refreshTokens.revokedAt, revokedCutoff)))
             .returning({ id: refreshTokens.id });
+        const spentCodes = await this.db
+            .delete(exchangeCodes)
+            .where(or(lt(exchangeCodes.expiresAt, new Date()), isNotNull(exchangeCodes.usedAt)))
+            .returning({ id: exchangeCodes.id });
 
-        return deleted.length;
+        return deleted.length + spentCodes.length;
     }
 
     verifyTwoFactorToken(token: string): string {

@@ -1,203 +1,231 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
-import { SYSTEM_ROLE_IDS } from "@/common/authorization/system-roles.constant.js";
+import {
+    BadRequestException,
+    ConflictException,
+    ForbiddenException,
+    Injectable,
+    NotFoundException,
+} from "@nestjs/common";
+import { ROLE_SLUGS } from "@/common/authorization/role-templates.constant.js";
 import type { AuthenticatedUser } from "@/common/types/authenticated-request.type.js";
-import { InjectDrizzle } from "@nestjs/drizzle";
-import { inArray, max } from "drizzle-orm";
-import type { Database } from "@/database/database.type.js";
-import { roles as rolesTable } from "@/database/schema/authorization.js";
+import { paginate } from "@/common/utils/pagination.util.js";
+import type { Role } from "@/database/schema/authorization.js";
+import { MembershipStatus } from "@/database/schema/enums.js";
 import { AuthService } from "@/modules/auth/auth.service.js";
 import { TokensService } from "@/modules/auth/tokens.service.js";
 import { PermissionsService } from "@/modules/authorization/permissions.service.js";
-import type { AdminUpdateUserInput } from "@/modules/admin/users/dto/admin-update-user.schema.js";
 import type { AssignRolesInput } from "@/modules/admin/users/dto/assign-roles.schema.js";
 import type { InviteUserInput } from "@/modules/admin/users/dto/invite-user.schema.js";
 import type { ListUsersInput } from "@/modules/admin/users/dto/list-users.schema.js";
-import { UsersService, type UserWithRoles } from "@/modules/users/users.service.js";
+import { MembershipsService, type MemberSummary } from "@/modules/tenants/memberships.service.js";
 import { toPublicUser } from "@/modules/users/users.mapper.js";
-import { paginate } from "@/common/utils/pagination.util.js";
+import { UsersService, type UserWithProfile } from "@/modules/users/users.service.js";
 
+/**
+ * Member management for the *current* organization. Users are global identities,
+ * so everything here acts on a membership: an organization's admin can change a
+ * member's roles, suspend their access here, and see their sessions here — but
+ * can never edit the account itself (email, password, name), restore it, or touch
+ * what they do in other organizations.
+ */
 @Injectable()
 export class AdminUsersService {
     constructor(
-        @InjectDrizzle() private readonly db: Database,
         private readonly usersService: UsersService,
+        private readonly membershipsService: MembershipsService,
         private readonly tokensService: TokensService,
         private readonly authService: AuthService,
         private readonly permissionsService: PermissionsService,
     ) {}
 
     async list(actor: AuthenticatedUser, query: ListUsersInput) {
-        const { items, total } = await this.usersService.list({
-            ...query,
+        const tenantId = this.tenantOf(actor);
+        const { userIds, total } = await this.membershipsService.list(tenantId, {
+            page: query.page,
+            limit: query.limit,
+            search: query.search,
+            roleSlug: query.roleId,
+            status: query.status,
             visibleTo: { actorId: actor.id, maxRank: actor.maxRank },
         });
-        return paginate(items.map(toPublicUser), query, total);
+
+        const [users, summaries] = await Promise.all([
+            this.usersService.findManyByIds(userIds),
+            this.membershipsService.summaries(tenantId, userIds),
+        ]);
+        const byId = new Map(summaries.map(summary => [summary.userId, summary]));
+
+        const items = userIds.flatMap(id => {
+            const user = users.get(id);
+            const member = byId.get(id);
+            return user && member ? [this.toMemberView(user, member)] : [];
+        });
+
+        return paginate(items, query, total);
     }
 
     async getById(actor: AuthenticatedUser, targetId: string) {
-        const target = await this.findManageableTarget(actor, targetId);
-        return toPublicUser(target);
-    }
-
-    /**
-     * An email change is not an ordinary field edit: the new address is unproven,
-     * and it is the address password-reset codes go to. So the account drops back
-     * to PENDING_VERIFICATION, existing sessions are cut, and a fresh verification
-     * code is sent — otherwise editing this one field would hand over the account.
-     */
-    async update(actor: AuthenticatedUser, targetId: string, data: AdminUpdateUserInput) {
-        const target = await this.findManageableTarget(actor, targetId);
-        const emailChanged = data.email !== undefined && data.email !== target.email;
-
-        const updated = await this.usersService.updateByAdmin(target.id, data, {
-            resetEmailVerification: emailChanged,
-        });
-
-        if (emailChanged) {
-            await this.tokensService.revokeAllRefreshTokens(target.id);
-            await this.permissionsService.bumpTokenVersion(target.id);
-            await this.authService.resendVerification(updated.email);
-        }
-
-        return toPublicUser(updated);
+        const { user, member } = await this.findManageableTarget(actor, targetId);
+        return this.toMemberView(user, member);
     }
 
     /**
      * Replaces the target's roles wholesale. The actor may only grant roles ranked
      * below their own — otherwise an admin could hand themselves, or a peer, a role
-     * they are not allowed to hold, escalating past their own ceiling.
+     * they are not allowed to hold. The one carve-out is `owner`: an owner may grant
+     * and revoke it, which is how ownership is handed over. The last owner can never
+     * be removed.
      */
     async assignRoles(actor: AuthenticatedUser, targetId: string, data: AssignRolesInput) {
-        const target = await this.findManageableTarget(actor, targetId);
+        const tenantId = this.tenantOf(actor);
+        const actorIsOwner = actor.roleIds.includes(ROLE_SLUGS.OWNER);
+        const { user, member } = await this.findManageableTarget(actor, targetId, { allowOwnerPeer: actorIsOwner });
 
-        if (target.id === actor.id) {
+        if (user.id === actor.id) {
             throw new ForbiddenException("You cannot change your own roles");
         }
 
-        const roleIds = [...new Set([SYSTEM_ROLE_IDS.USER, ...data.roleIds])];
-        const roles = await this.db.select().from(rolesTable).where(inArray(rolesTable.id, roleIds));
+        const slugs = [...new Set([ROLE_SLUGS.USER, ...data.roleIds])];
+        const roles = await this.membershipsService.findRolesBySlugs(tenantId, slugs);
 
-        if (roles.length !== roleIds.length) {
+        if (roles.length !== slugs.length) {
             throw new BadRequestException("One or more roles do not exist");
         }
 
-        const tooHigh = roles.find(role => role.rank >= actor.maxRank);
-        if (tooHigh) {
-            throw new ForbiddenException(`You cannot grant the "${tooHigh.name}" role`);
+        const ungrantable = roles.find(role => !this.canGrant(actor, role));
+        if (ungrantable) {
+            throw new ForbiddenException(`You cannot grant the "${ungrantable.name}" role`);
         }
 
-        await this.permissionsService.assignRoles(target.id, roleIds, actor.id);
-
-        return toPublicUser(await this.usersService.findByIdOrThrow(target.id));
-    }
-
-    async updateStatus(actor: AuthenticatedUser, targetId: string, status: "ACTIVE" | "SUSPENDED") {
-        const target = await this.findManageableTarget(actor, targetId);
-        const updated = await this.usersService.updateStatus(target.id, status);
-
-        if (status === "SUSPENDED") {
-            await this.tokensService.revokeAllRefreshTokens(target.id);
-            await this.permissionsService.bumpTokenVersion(target.id);
-        } else {
-            // Reactivation bumps no version, so the cached principal would keep
-            // reporting SUSPENDED — and the guard would keep refusing — until its
-            // TTL ran out.
-            await this.permissionsService.invalidateCache(target.id);
+        const losingOwner = member.roleIds.includes(ROLE_SLUGS.OWNER) && !slugs.includes(ROLE_SLUGS.OWNER);
+        if (losingOwner && (await this.membershipsService.countOwners(tenantId)) <= 1) {
+            throw new ConflictException({
+                code: "LAST_OWNER",
+                message: "An organization must keep at least one owner",
+            });
         }
 
-        return toPublicUser(updated);
+        await this.permissionsService.assignRoles(
+            tenantId,
+            user.id,
+            roles.map(role => role.id),
+            actor.id,
+        );
+
+        const updated = await this.membershipsService.get(tenantId, user.id);
+        return this.toMemberView(user, updated!);
     }
 
-    /**
-     * Admins cannot delete accounts — only the owner can, and only for
-     * themselves. This reverses that self-service deletion on request (support
-     * ticket, "I changed my mind"), which is why it is the one place allowed to
-     * load a deleted target.
-     */
-    async restore(actor: AuthenticatedUser, targetId: string) {
-        const target = await this.findManageableTarget(actor, targetId, { includeDeleted: true });
-        const updated = await this.usersService.restore(target.id);
-        await this.permissionsService.invalidateCache(target.id);
-        return toPublicUser(updated);
+    /** Suspending removes the member's access to *this* organization only; their account and other memberships are untouched. */
+    async updateStatus(actor: AuthenticatedUser, targetId: string, status: MembershipStatus) {
+        const tenantId = this.tenantOf(actor);
+        const { user, member } = await this.findManageableTarget(actor, targetId);
+
+        if (user.id === actor.id) {
+            throw new ForbiddenException("You cannot change your own status");
+        }
+
+        if (status === MembershipStatus.SUSPENDED) {
+            if (
+                member.roleIds.includes(ROLE_SLUGS.OWNER) &&
+                (await this.membershipsService.countOwners(tenantId)) <= 1
+            ) {
+                throw new ConflictException({
+                    code: "LAST_OWNER",
+                    message: "An organization must keep at least one owner",
+                });
+            }
+            await this.tokensService.revokeAllRefreshTokens(user.id, tenantId);
+        }
+
+        // setStatus drops the cached principal, and the guard reads the membership
+        // status from it, so the change takes effect on the member's next request.
+        await this.membershipsService.setStatus(tenantId, user.id, status);
+
+        const updated = await this.membershipsService.get(tenantId, user.id);
+        return this.toMemberView(user, updated!);
     }
 
     async triggerPasswordReset(actor: AuthenticatedUser, targetId: string) {
-        const target = await this.findManageableTarget(actor, targetId);
-        await this.authService.forgotPassword(target.email);
+        const { user } = await this.findManageableTarget(actor, targetId);
+        await this.authService.forgotPassword(user.email);
     }
 
     async listSessions(actor: AuthenticatedUser, targetId: string) {
-        const target = await this.findManageableTarget(actor, targetId);
-        const sessions = await this.tokensService.listActiveSessions(target.id);
+        const { user } = await this.findManageableTarget(actor, targetId);
+        const sessions = await this.tokensService.listActiveSessions(user.id, this.tenantOf(actor));
         return sessions.map(({ tokenHash: _tokenHash, ...session }) => session);
     }
 
     async revokeSession(actor: AuthenticatedUser, targetId: string, sessionId: string) {
         await this.findManageableTarget(actor, targetId);
-        await this.tokensService.revokeSessionById(targetId, sessionId);
+        await this.tokensService.revokeSessionById(targetId, sessionId, this.tenantOf(actor));
     }
 
     async revokeAllSessions(actor: AuthenticatedUser, targetId: string) {
-        const target = await this.findManageableTarget(actor, targetId);
-        await this.tokensService.revokeAllRefreshTokens(target.id);
-        await this.permissionsService.bumpTokenVersion(target.id);
+        const { user } = await this.findManageableTarget(actor, targetId);
+        // Only this organization's sessions: the member's other organizations are none of this admin's business.
+        await this.tokensService.revokeAllRefreshTokens(user.id, this.tenantOf(actor));
+        await this.permissionsService.bumpPermVersion(this.tenantOf(actor), user.id);
     }
 
     async invite(actor: AuthenticatedUser, data: InviteUserInput) {
-        const roleIds = [...new Set([SYSTEM_ROLE_IDS.USER, ...data.roleIds])];
-        const roles = await this.db.select().from(rolesTable).where(inArray(rolesTable.id, roleIds));
+        const tenantId = this.tenantOf(actor);
+        const slugs = [...new Set([ROLE_SLUGS.USER, ...data.roleIds])];
+        const roles = await this.membershipsService.findRolesBySlugs(tenantId, slugs);
 
-        if (roles.length !== roleIds.length) {
+        if (roles.length !== slugs.length) {
             throw new BadRequestException("One or more roles do not exist");
         }
 
-        const tooHigh = roles.find(role => role.rank >= actor.maxRank);
-        if (tooHigh) {
-            throw new ForbiddenException(`You cannot grant the "${tooHigh.name}" role`);
+        const ungrantable = roles.find(role => !this.canGrant(actor, role));
+        if (ungrantable) {
+            throw new ForbiddenException(`You cannot grant the "${ungrantable.name}" role`);
         }
 
-        return this.authService.invite(data.email, roleIds);
+        return this.authService.invite(tenantId, actor.id, data.email, slugs);
+    }
+
+    private canGrant(actor: AuthenticatedUser, role: Role): boolean {
+        return (
+            role.rank < actor.maxRank || (role.slug === ROLE_SLUGS.OWNER && actor.roleIds.includes(ROLE_SLUGS.OWNER))
+        );
+    }
+
+    private tenantOf(actor: AuthenticatedUser): string {
+        if (!actor.tenantId) {
+            throw new ForbiddenException("This route needs an organization context");
+        }
+        return actor.tenantId;
+    }
+
+    private toMemberView(user: UserWithProfile, member: MemberSummary) {
+        return { ...toPublicUser(user, member.roleIds), membershipStatus: member.status };
     }
 
     /**
-     * Loads the target and enforces the management hierarchy: an actor may only
-     * act on users whose highest rank is strictly below their own. This replaces
-     * the old hard-coded "ADMIN may only touch USER" check — the rule now holds
-     * for any roles created at runtime, without further code changes.
+     * Loads the target *as a member of this organization* and enforces the
+     * management hierarchy: an actor may only act on members whose highest rank is
+     * strictly below their own. A user who is not a member here simply does not
+     * exist as far as this tenant is concerned — 404, never 403.
      */
     private async findManageableTarget(
         actor: AuthenticatedUser,
         targetId: string,
-        options: { includeDeleted?: boolean } = {},
-    ): Promise<UserWithRoles> {
-        const target = await this.usersService.findById(targetId);
+        options: { allowOwnerPeer?: boolean } = {},
+    ): Promise<{ user: UserWithProfile; member: MemberSummary }> {
+        const tenantId = this.tenantOf(actor);
+        const member = await this.membershipsService.get(tenantId, targetId);
+        const user = member ? await this.usersService.findActiveById(targetId) : null;
 
-        if (!target || (target.deletedAt && !options.includeDeleted)) {
+        if (!member || !user) {
             throw new NotFoundException("User not found");
         }
 
-        if (target.id !== actor.id && (await this.rankOf(target)) >= actor.maxRank) {
+        const peerOwner = options.allowOwnerPeer && member.roleIds.includes(ROLE_SLUGS.OWNER);
+        if (user.id !== actor.id && !peerOwner && member.maxRank >= actor.maxRank) {
             throw new ForbiddenException("You do not have permission to manage this account");
         }
 
-        return target;
-    }
-
-    private async rankOf(user: UserWithRoles): Promise<number> {
-        if (user.roles.length === 0) {
-            return 0;
-        }
-
-        const [aggregate] = await this.db
-            .select({ rank: max(rolesTable.rank) })
-            .from(rolesTable)
-            .where(
-                inArray(
-                    rolesTable.id,
-                    user.roles.map(({ roleId }) => roleId),
-                ),
-            );
-
-        return aggregate?.rank ?? 0;
+        return { user, member };
     }
 }

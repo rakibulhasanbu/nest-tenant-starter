@@ -19,14 +19,14 @@ export class AdminRolesController {
 
     @RequirePermissions(PERMISSIONS.ROLE_READ)
     @Get("roles")
-    list() {
-        return this.adminRolesService.list();
+    list(@CurrentUser() actor: AuthenticatedUser) {
+        return this.adminRolesService.list(actor);
     }
 
     @RequirePermissions(PERMISSIONS.ROLE_READ)
     @Get("roles/:id")
-    getById(@Param("id") id: string) {
-        return this.adminRolesService.getById(id);
+    getById(@CurrentUser() actor: AuthenticatedUser, @Param("id") id: string) {
+        return this.adminRolesService.getBySlug(actor, id);
     }
 
     @RequirePermissions(PERMISSIONS.ROLE_WRITE)

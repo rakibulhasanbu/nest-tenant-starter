@@ -1,10 +1,22 @@
-import { BadRequestException, ConflictException, Inject, Injectable, UnauthorizedException } from "@nestjs/common";
+import {
+    BadRequestException,
+    ConflictException,
+    ForbiddenException,
+    Inject,
+    Injectable,
+    NotFoundException,
+    UnauthorizedException,
+} from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import * as argon2 from "argon2";
 import { randomUUID } from "node:crypto";
+import { assertTenantUsable } from "@/common/tenant/tenant-state.util.js";
+import type { HostContext } from "@/common/types/host-context.type.js";
+import { ROLE_SLUGS } from "@/common/authorization/role-templates.constant.js";
 import { resolveDeviceInfo } from "@/common/utils/device.util.js";
 import type { Env } from "@/config/env.schema.js";
-import { AuthProvider, EmailTokenType, UserStatus } from "@/database/schema/enums.js";
+import { AuthProvider, EmailTokenType, MembershipStatus, TenantStatus, UserStatus } from "@/database/schema/enums.js";
+import type { Tenant } from "@/database/schema/tenants.js";
 import { EMAIL_SENDER, type EmailSender } from "@/integrations/email/email-sender.interface.js";
 import { EmailTokensService } from "@/modules/auth/email-tokens.service.js";
 import { GoogleAuthService } from "@/modules/auth/google-auth.service.js";
@@ -13,14 +25,56 @@ import { TwoFactorService } from "@/modules/auth/two-factor.service.js";
 import type { SignupInput } from "@/modules/auth/dto/signup.schema.js";
 import type { SigninInput } from "@/modules/auth/dto/signin.schema.js";
 import { TokensService } from "@/modules/auth/tokens.service.js";
-import { UsersService, type UserWithRoles } from "@/modules/users/users.service.js";
+import { UsersService, type UserWithProfile } from "@/modules/users/users.service.js";
 import { PermissionsService } from "@/modules/authorization/permissions.service.js";
+import { MembershipsService } from "@/modules/tenants/memberships.service.js";
+import { TenantsService } from "@/modules/tenants/tenants.service.js";
 import { toPublicUser, type PublicUser } from "@/modules/users/users.mapper.js";
+
+/**
+ * Which tenant a login is for. The host wins (`acme.example.com`); clients with no
+ * subdomain (mobile, the apex site) may name one in the request body instead.
+ */
+export interface TenantTarget {
+    host: HostContext;
+    tenantSlug?: string;
+}
 
 export interface LoginContext {
     userAgent?: string;
     ipAddress?: string;
+    target?: TenantTarget;
 }
+
+export interface SessionTenant {
+    id: string;
+    slug: string;
+    name: string;
+    url: string;
+}
+
+export interface Session {
+    accessToken: string;
+    refreshToken: string;
+    /** The organization this session acts in; `null` for the platform console. */
+    tenant: SessionTenant | null;
+}
+
+export interface TenantChoice {
+    slug: string;
+    name: string;
+    status: TenantStatus;
+    url: string;
+}
+
+/** Signin matched several usable organizations: pick one with POST /auth/select-tenant. */
+export interface TenantSelectionRequired {
+    tenantSelectionRequired: true;
+    selectionToken: string;
+    tenants: TenantChoice[];
+}
+
+export type SessionOutcome = Session | TenantSelectionRequired;
 
 @Injectable()
 export class AuthService {
@@ -34,12 +88,18 @@ export class AuthService {
         private readonly permissionsService: PermissionsService,
         private readonly configService: ConfigService<Env, true>,
         @Inject(EMAIL_SENDER) private readonly emailSender: EmailSender,
+        private readonly tenantsService: TenantsService,
+        private readonly membershipsService: MembershipsService,
     ) {}
 
     /** Lazily built once — see burnPasswordComparison. */
     private decoyPasswordHash?: Promise<string>;
 
-    async signup(input: SignupInput): Promise<{ user: PublicUser }> {
+    /**
+     * Signing up creates the account *and* the organization it owns. The slug is
+     * validated first so a taken subdomain fails before any account exists.
+     */
+    async signup(input: SignupInput): Promise<{ user: PublicUser; tenant: SessionTenant & { status: TenantStatus } }> {
         const existing = await this.usersService.findByEmail(input.email);
         if (existing?.deletedAt) {
             // The row is still there (grace period), so the unique email would
@@ -51,6 +111,8 @@ export class AuthService {
             throw new ConflictException("An account with this email already exists");
         }
 
+        await this.tenantsService.assertSlugAvailable(input.tenantSlug);
+
         const passwordHash = await argon2.hash(input.password);
         const user = await this.usersService.createUser({
             email: input.email,
@@ -59,9 +121,17 @@ export class AuthService {
             phone: input.phone,
         });
 
+        const tenant = await this.tenantsService.createForOwner(user.id, {
+            name: input.tenantName,
+            slug: input.tenantSlug,
+        });
+
         await this.sendVerificationEmail(user.id, user.email);
 
-        return { user: toPublicUser(user) };
+        return {
+            user: toPublicUser(user, [ROLE_SLUGS.OWNER, ROLE_SLUGS.USER]),
+            tenant: { ...this.toSessionTenant(tenant), status: tenant.status },
+        };
     }
 
     async signin(input: SigninInput, context: LoginContext) {
@@ -123,10 +193,7 @@ export class AuthService {
             return { twoFactorRequired: true as const, twoFactorToken: this.tokensService.signTwoFactorToken(user.id) };
         }
 
-        return this.issueSession(user, context, {
-            deviceType: input.deviceType,
-            deviceName: input.deviceName,
-        });
+        return this.startSession(user, context, { deviceType: input.deviceType, deviceName: input.deviceName });
     }
 
     async refresh(
@@ -134,6 +201,14 @@ export class AuthService {
         context: LoginContext,
         explicitDevice?: { deviceType?: string; deviceName?: string },
     ) {
+        // Host first, token second: a refresh sent to the wrong tenant's host must be
+        // refused *without* spending the token, or one misrouted request would end
+        // the user's session.
+        const live = await this.tokensService.peekRefreshToken(rawRefreshToken);
+        if (live) {
+            this.assertRefreshHost(context, live.tenantId);
+        }
+
         const consumption = await this.tokensService.consumeRefreshToken(rawRefreshToken);
 
         if (consumption.outcome === "reused") {
@@ -153,8 +228,22 @@ export class AuthService {
             throw new UnauthorizedException("Invalid or expired refresh token");
         }
 
-        // Same family: this is a rotation of an existing login, not a new one.
-        return this.issueSession(record.user, context, explicitDevice, record.familyId);
+        this.assertRefreshHost(context, record.tenantId);
+
+        if (record.tenantId === null) {
+            if (!(await this.permissionsService.resolvePlatform(record.user.id))) {
+                throw new UnauthorizedException("Invalid or expired refresh token");
+            }
+            // Same family: this is a rotation of an existing login, not a new one.
+            return this.issuePlatformSession(record.user, context, explicitDevice, record.familyId);
+        }
+
+        const tenant = await this.tenantsService.findById(record.tenantId);
+        if (!tenant) {
+            throw new UnauthorizedException("Invalid or expired refresh token");
+        }
+
+        return this.issueTenantSession(record.user, tenant, context, explicitDevice, record.familyId);
     }
 
     async logout(rawRefreshToken: string): Promise<void> {
@@ -180,7 +269,7 @@ export class AuthService {
         // The guard authorizes against the account's status, so the cached
         // principal has to drop its now-stale PENDING_VERIFICATION copy.
         await this.permissionsService.invalidateCache(user.id);
-        return this.issueSession(verified, context, explicitDevice);
+        return this.startSession(verified, context, explicitDevice);
     }
 
     async resendVerification(email: string): Promise<void> {
@@ -237,7 +326,7 @@ export class AuthService {
         await this.permissionsService.bumpTokenVersion(user.id);
 
         const refreshed = await this.usersService.findByIdOrThrow(user.id);
-        return this.issueSession(refreshed, context, explicitDevice);
+        return this.startSession(refreshed, context, explicitDevice);
     }
 
     async changePassword(userId: string, currentPassword: string, newPassword: string): Promise<void> {
@@ -281,7 +370,11 @@ export class AuthService {
         await this.usersService.setPassword(userId, passwordHash);
     }
 
-    async loginWithGoogle(idToken: string, context: LoginContext) {
+    /**
+     * `newTenant` is only needed the first time: a Google identity that has no
+     * account yet becomes one together with the organization it owns.
+     */
+    async loginWithGoogle(idToken: string, context: LoginContext, newTenant?: { name: string; slug: string }) {
         const profile = await this.googleAuthService.verifyIdToken(idToken);
         if (!profile.emailVerified) {
             throw new UnauthorizedException("Google account email is not verified");
@@ -292,7 +385,7 @@ export class AuthService {
             profile.providerAccountId,
         );
 
-        const user = identity ? identity.user : await this.linkOrCreateGoogleUser(profile);
+        const user = identity ? identity.user : await this.linkOrCreateGoogleUser(profile, newTenant);
 
         if (user.deletedAt) {
             await this.offerReactivation(user.id, user.email, user.deletedAt);
@@ -302,10 +395,13 @@ export class AuthService {
             throw new UnauthorizedException("This account is not available");
         }
 
-        return this.issueSession(user, context);
+        return this.startSession(user, context);
     }
 
-    private async linkOrCreateGoogleUser(profile: { providerAccountId: string; email: string; name?: string }) {
+    private async linkOrCreateGoogleUser(
+        profile: { providerAccountId: string; email: string; name?: string },
+        newTenant?: { name: string; slug: string },
+    ) {
         const existingUser = await this.usersService.findByEmail(profile.email);
 
         if (existingUser) {
@@ -343,6 +439,14 @@ export class AuthService {
             return existingUser;
         }
 
+        if (!newTenant) {
+            throw new BadRequestException({
+                code: "TENANT_DETAILS_REQUIRED",
+                message: "Creating a new account needs an organization name and slug",
+            });
+        }
+        await this.tenantsService.assertSlugAvailable(newTenant.slug);
+
         const user = await this.usersService.createUser({
             email: profile.email,
             name: profile.name,
@@ -350,6 +454,7 @@ export class AuthService {
             emailVerifiedAt: new Date(),
         });
         await this.socialIdentitiesService.link(user.id, AuthProvider.GOOGLE, profile.providerAccountId, profile.email);
+        await this.tenantsService.createForOwner(user.id, newTenant);
         return user;
     }
 
@@ -380,6 +485,7 @@ export class AuthService {
         if (!user || user.deletedAt) {
             throw new UnauthorizedException("Invalid credentials");
         }
+        await this.assertNotSoleOwner(user.id);
 
         const code = await this.emailTokensService.issueDeleteAccountToken(user.id);
         if (code) {
@@ -394,6 +500,8 @@ export class AuthService {
             throw new UnauthorizedException("Invalid credentials");
         }
 
+        await this.assertNotSoleOwner(user.id);
+
         if (!(await this.emailTokensService.consume(user.id, EmailTokenType.DELETE_ACCOUNT, code))) {
             throw new BadRequestException("Invalid or expired confirmation code");
         }
@@ -407,33 +515,56 @@ export class AuthService {
     }
 
     /**
-     * Creates an account with the given roles and emails a reset code. The
-     * placeholder password is unusable by design — completing the reset is what
-     * both sets a real password and proves the invitee owns the address.
+     * An organization must always keep an owner, so the last one cannot walk away
+     * by deleting their account — ownership has to be handed over first.
      */
-    async invite(email: string, roleIds: string[]): Promise<PublicUser> {
+    private async assertNotSoleOwner(userId: string): Promise<void> {
+        const sole = await this.membershipsService.tenantsWhereSoleOwner(userId);
+        if (sole.length > 0) {
+            throw new ConflictException({
+                code: "SOLE_OWNER",
+                message: "Transfer ownership of your organizations before deleting your account",
+                tenantIds: sole,
+            });
+        }
+    }
+
+    /**
+     * Adds someone to a tenant. A new address gets an account with an unusable
+     * placeholder password and an emailed reset code — completing the reset both
+     * sets a real password and proves they own the address. An address that
+     * already has an account is simply added as a member: identity is global, so
+     * there is nothing to create, and they keep their existing credentials.
+     */
+    async invite(tenantId: string, actorId: string, email: string, roleSlugs: string[]): Promise<PublicUser> {
         const existing = await this.usersService.findByEmail(email);
-        if (existing) {
+
+        if (existing?.deletedAt) {
             throw new ConflictException(
-                existing.deletedAt
-                    ? "This address belongs to an account awaiting deletion — its owner must reactivate it, or the grace period must run out first"
-                    : "An account with this email already exists",
+                "This address belongs to an account awaiting deletion — its owner must reactivate it, or the grace period must run out first",
             );
+        }
+
+        if (existing) {
+            await this.membershipsService.add(tenantId, existing.id, roleSlugs, actorId);
+            const member = await this.membershipsService.get(tenantId, existing.id);
+            return toPublicUser(existing, member?.roleIds ?? []);
         }
 
         const placeholderPassword = await argon2.hash(randomUUID());
         const user = await this.usersService.createUser({
             email,
             passwordHash: placeholderPassword,
-            roleIds,
         });
+        await this.membershipsService.add(tenantId, user.id, roleSlugs, actorId);
 
         const code = await this.emailTokensService.issueResetPasswordToken(user.id);
         if (code) {
             await this.emailSender.sendResetPassword({ to: user.email, code });
         }
 
-        return toPublicUser(user);
+        const member = await this.membershipsService.get(tenantId, user.id);
+        return toPublicUser(user, member?.roleIds ?? []);
     }
 
     /**
@@ -526,7 +657,7 @@ export class AuthService {
 
         await this.usersService.resetFailedLogin(user.id);
 
-        return this.issueSession(user, context, explicitDevice);
+        return this.startSession(user, context, explicitDevice);
     }
 
     /**
@@ -600,7 +731,7 @@ export class AuthService {
         });
     }
 
-    private isReachableAccount(user: Pick<UserWithRoles, "status" | "deletedAt">): boolean {
+    private isReachableAccount(user: Pick<UserWithProfile, "status" | "deletedAt">): boolean {
         return !user.deletedAt && user.status !== UserStatus.SUSPENDED;
     }
 
@@ -612,36 +743,314 @@ export class AuthService {
     }
 
     /**
-     * Stamps the user's current version markers into the access token. The guard
-     * compares them on every request, so any later role change or session kill
+     * Decides which organization a freshly authenticated user is signing in to and
+     * issues the session for it. The host wins, then an explicit slug; with neither,
+     * the user's memberships decide — one usable tenant signs straight in, several
+     * return a picker, none returns the reason (pending approval, suspended, ...).
+     */
+    private async startSession(
+        user: Pick<UserWithProfile, "id" | "email" | "tokenVersion">,
+        context: LoginContext,
+        explicitDevice?: { deviceType?: string; deviceName?: string },
+    ): Promise<SessionOutcome> {
+        const target = context.target;
+        const kind = target?.host.kind ?? "apex";
+
+        if (kind === "platform") {
+            // Same message as a wrong password: the platform host must not reveal who the super admin is.
+            if (!(await this.permissionsService.resolvePlatform(user.id))) {
+                throw new UnauthorizedException("Invalid email or password");
+            }
+            return this.issuePlatformSession(user, context, explicitDevice);
+        }
+
+        const slug = target?.host.tenant?.slug ?? target?.tenantSlug;
+        if (slug) {
+            const tenant = await this.tenantsService.findBySlug(slug);
+            if (!tenant) {
+                throw new NotFoundException({ code: "TENANT_NOT_FOUND", message: "Organization not found" });
+            }
+            try {
+                return await this.issueTenantSession(user, tenant, context, explicitDevice);
+            } catch (error) {
+                // Pending/rejected/suspended: the client shows every organization's state, not just this one's.
+                if (error instanceof ForbiddenException && /^(TENANT_|MEMBERSHIP_)/.test(codeOf(error))) {
+                    const all = await this.tenantsService.listForUser(user.id);
+                    throw new ForbiddenException({
+                        ...(error.getResponse() as Record<string, unknown>),
+                        tenants: all.map(({ slug, name, status, url }) => ({ slug, name, status, url })),
+                    });
+                }
+                throw error;
+            }
+        }
+
+        const memberships = await this.tenantsService.listForUser(user.id);
+        if (memberships.length === 0) {
+            throw new ForbiddenException({
+                code: "NO_ORGANIZATION",
+                message: "This account does not belong to any organization",
+            });
+        }
+
+        const usable = memberships.filter(
+            tenant => tenant.status === TenantStatus.ACTIVE && tenant.membershipStatus === MembershipStatus.ACTIVE,
+        );
+        const choices: TenantChoice[] = memberships.map(({ slug, name, status, url }) => ({ slug, name, status, url }));
+
+        if (usable.length === 1) {
+            const tenant = await this.tenantsService.findByIdOrThrow(usable[0]!.id);
+            return this.issueTenantSession(user, tenant, context, explicitDevice);
+        }
+
+        if (usable.length > 1) {
+            return {
+                tenantSelectionRequired: true,
+                selectionToken: this.tokensService.signTenantSelectionToken(user.id),
+                tenants: choices,
+            };
+        }
+
+        // Nothing usable: report the most useful reason, with the list so the client can show every organization's state.
+        const reason =
+            memberships.find(tenant => tenant.status === TenantStatus.PENDING_APPROVAL) ??
+            memberships.find(tenant => tenant.status === TenantStatus.SUSPENDED) ??
+            memberships[0]!;
+        try {
+            assertTenantUsable(reason.status, reason.rejectionReason);
+        } catch (error) {
+            if (error instanceof ForbiddenException) {
+                const body = error.getResponse() as Record<string, unknown>;
+                throw new ForbiddenException({ ...body, tenants: choices });
+            }
+            throw error;
+        }
+        throw new ForbiddenException({
+            code: "MEMBERSHIP_SUSPENDED",
+            message: "Your access to this organization has been suspended",
+            tenants: choices,
+        });
+    }
+
+    /**
+     * A session belongs to the host it was issued for: refreshing a tenant session
+     * on another tenant's subdomain, or a platform session off the platform host,
+     * would only hand out a token the guard rejects later.
+     */
+    private assertRefreshHost(context: LoginContext, tenantId: string | null): void {
+        const host = context.target?.host;
+        if (!host) {
+            return;
+        }
+
+        if (tenantId === null) {
+            if (host.kind !== "platform") {
+                throw new ForbiddenException({
+                    code: "PLATFORM_HOST_REQUIRED",
+                    message: "Platform sessions can only be used on the platform host",
+                });
+            }
+            return;
+        }
+
+        this.assertHostAllows(context, tenantId);
+    }
+
+    /** Second step after signin returned a picker: the user names the organization they want. */
+    async selectTenant(
+        selectionToken: string,
+        tenantSlug: string,
+        context: LoginContext,
+        explicitDevice?: { deviceType?: string; deviceName?: string },
+    ): Promise<Session> {
+        const userId = this.tokensService.verifyTenantSelectionToken(selectionToken);
+        const user = await this.usersService.findById(userId);
+        if (!user || user.deletedAt || user.status !== UserStatus.ACTIVE) {
+            throw new UnauthorizedException("This account is not available");
+        }
+
+        const tenant = await this.tenantsService.findBySlug(tenantSlug);
+        if (!tenant) {
+            throw new NotFoundException({ code: "TENANT_NOT_FOUND", message: "Organization not found" });
+        }
+        this.assertHostAllows(context, tenant.id);
+
+        return this.issueTenantSession(user, tenant, context, explicitDevice);
+    }
+
+    /**
+     * Lets a signed-in user move to another of their organizations without typing
+     * a password again. Each tenant host is a separate origin, so instead of a
+     * session this hands back a one-time code the target host redeems.
+     */
+    async createTenantSwitch(userId: string, tenantSlug: string) {
+        const tenant = await this.tenantsService.findBySlug(tenantSlug);
+        if (!tenant) {
+            throw new NotFoundException({ code: "TENANT_NOT_FOUND", message: "Organization not found" });
+        }
+
+        const membership = await this.membershipsService.findMembership(tenant.id, userId);
+        if (!membership) {
+            throw new ForbiddenException({
+                code: "NOT_A_MEMBER",
+                message: "You are not a member of this organization",
+            });
+        }
+        assertTenantUsable(tenant.status, tenant.rejectionReason);
+        this.assertMembershipUsable(membership.status);
+
+        return {
+            tenant: this.toSessionTenant(tenant),
+            exchangeCode: await this.tokensService.issueExchangeCode(userId, tenant.id),
+        };
+    }
+
+    /** Redeems a code from {@link createTenantSwitch}. */
+    async exchange(
+        code: string,
+        context: LoginContext,
+        explicitDevice?: { deviceType?: string; deviceName?: string },
+    ): Promise<Session> {
+        // Host check before the code is spent, so a wrong-host attempt cannot burn it.
+        const pending = await this.tokensService.peekExchangeCode(code);
+        if (!pending) {
+            throw new UnauthorizedException("Invalid or expired exchange code");
+        }
+        this.assertHostAllows(context, pending.tenantId);
+
+        const claimed = await this.tokensService.consumeExchangeCode(code);
+        if (!claimed) {
+            throw new UnauthorizedException("Invalid or expired exchange code");
+        }
+
+        const user = await this.usersService.findById(claimed.userId);
+        if (!user || user.deletedAt || user.status !== UserStatus.ACTIVE) {
+            throw new UnauthorizedException("This account is not available");
+        }
+
+        const tenant = await this.tenantsService.findByIdOrThrow(claimed.tenantId);
+        this.assertHostAllows(context, tenant.id);
+
+        return this.issueTenantSession(user, tenant, context, explicitDevice);
+    }
+
+    /** A request on a tenant subdomain may only act for that tenant; the platform host acts for none. */
+    private assertHostAllows(context: LoginContext, tenantId: string): void {
+        const host = context.target?.host;
+        if (host?.kind === "platform" || (host?.kind === "tenant" && host.tenant?.id !== tenantId)) {
+            throw new ForbiddenException({
+                code: "TENANT_MISMATCH",
+                message: "This request is for a different organization",
+            });
+        }
+    }
+
+    private assertMembershipUsable(status: MembershipStatus): void {
+        if (status === MembershipStatus.SUSPENDED) {
+            throw new ForbiddenException({
+                code: "MEMBERSHIP_SUSPENDED",
+                message: "Your access to this organization has been suspended",
+            });
+        }
+    }
+
+    /**
+     * Issues a session for one organization after checking the user may enter it.
+     * Stamps the membership's version markers into the access token: the guard
+     * compares them on every request, so a later role change or session kill
      * invalidates this token immediately instead of at expiry.
      */
-    private async issueSession(
-        user: Pick<UserWithRoles, "id" | "email" | "permVersion" | "tokenVersion">,
+    private async issueTenantSession(
+        user: Pick<UserWithProfile, "id" | "email" | "tokenVersion">,
+        tenant: Tenant,
         context: LoginContext,
         explicitDevice?: { deviceType?: string; deviceName?: string },
         familyId?: string,
-    ) {
-        const device = resolveDeviceInfo(context.userAgent, explicitDevice);
-        // The refresh token goes first because it decides the family id, and the
-        // access token has to carry that id to know which session it belongs to.
-        const { token: refreshToken, familyId: sessionId } = await this.tokensService.issueRefreshToken(
+    ): Promise<Session> {
+        this.assertHostAllows(context, tenant.id);
+
+        const membership = await this.membershipsService.findMembership(tenant.id, user.id);
+        if (!membership) {
+            throw new ForbiddenException({
+                code: "NOT_A_MEMBER",
+                message: "You are not a member of this organization",
+            });
+        }
+        assertTenantUsable(tenant.status, tenant.rejectionReason);
+        this.assertMembershipUsable(membership.status);
+
+        const { refreshToken, sessionId } = await this.issueRefreshToken(
             user.id,
-            {
-                userAgent: context.userAgent,
-                ipAddress: context.ipAddress,
-                device,
-            },
+            tenant.id,
+            context,
+            explicitDevice,
             familyId,
         );
         const accessToken = this.tokensService.signAccessToken({
             sub: user.id,
             email: user.email,
-            permVersion: user.permVersion,
+            tenantId: tenant.id,
+            permVersion: membership.permVersion,
             tokenVersion: user.tokenVersion,
             sessionId,
         });
 
-        return { accessToken, refreshToken };
+        return { accessToken, refreshToken, tenant: this.toSessionTenant(tenant) };
     }
+
+    private async issuePlatformSession(
+        user: Pick<UserWithProfile, "id" | "email" | "tokenVersion">,
+        context: LoginContext,
+        explicitDevice?: { deviceType?: string; deviceName?: string },
+        familyId?: string,
+    ): Promise<Session> {
+        const { refreshToken, sessionId } = await this.issueRefreshToken(
+            user.id,
+            null,
+            context,
+            explicitDevice,
+            familyId,
+        );
+        const accessToken = this.tokensService.signAccessToken({
+            sub: user.id,
+            email: user.email,
+            tenantId: null,
+            permVersion: 0,
+            tokenVersion: user.tokenVersion,
+            sessionId,
+        });
+
+        return { accessToken, refreshToken, tenant: null };
+    }
+
+    /**
+     * The refresh token goes first because it decides the family id, and the
+     * access token has to carry that id to know which session it belongs to.
+     */
+    private async issueRefreshToken(
+        userId: string,
+        tenantId: string | null,
+        context: LoginContext,
+        explicitDevice?: { deviceType?: string; deviceName?: string },
+        familyId?: string,
+    ) {
+        const device = resolveDeviceInfo(context.userAgent, explicitDevice);
+        const { token, familyId: sessionId } = await this.tokensService.issueRefreshToken(
+            userId,
+            tenantId,
+            { userAgent: context.userAgent, ipAddress: context.ipAddress, device },
+            familyId,
+        );
+
+        return { refreshToken: token, sessionId };
+    }
+
+    private toSessionTenant(tenant: Pick<Tenant, "id" | "slug" | "name">): SessionTenant {
+        return { id: tenant.id, slug: tenant.slug, name: tenant.name, url: this.tenantsService.urlFor(tenant.slug) };
+    }
+}
+
+function codeOf(error: ForbiddenException): string {
+    const body = error.getResponse();
+    return typeof body === "object" && body !== null ? String((body as { code?: string }).code ?? "") : "";
 }

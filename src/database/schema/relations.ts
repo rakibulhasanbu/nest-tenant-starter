@@ -1,9 +1,10 @@
 import { defineRelations } from "drizzle-orm";
 import * as auth from "@/database/schema/auth.js";
 import * as authorization from "@/database/schema/authorization.js";
+import * as tenants from "@/database/schema/tenants.js";
 import * as users from "@/database/schema/users.js";
 
-export const schema = { ...users, ...authorization, ...auth };
+export const schema = { ...users, ...tenants, ...authorization, ...auth };
 
 export const relations = defineRelations(schema, r => ({
     users: {
@@ -12,7 +13,8 @@ export const relations = defineRelations(schema, r => ({
             from: r.users.id,
             to: r.notificationPreferences.userId,
         }),
-        roles: r.many.userRoles(),
+        memberships: r.many.tenantMemberships(),
+        platformAdmin: r.one.platformAdmins({ from: r.users.id, to: r.platformAdmins.userId }),
         refreshTokens: r.many.refreshTokens(),
         emailTokens: r.many.emailTokens(),
         socialIdentities: r.many.socialIdentities(),
@@ -23,12 +25,32 @@ export const relations = defineRelations(schema, r => ({
     notificationPreferences: {
         user: r.one.users({ from: r.notificationPreferences.userId, to: r.users.id, optional: false }),
     },
-    userRoles: {
-        user: r.one.users({ from: r.userRoles.userId, to: r.users.id, optional: false }),
-        role: r.one.roles({ from: r.userRoles.roleId, to: r.roles.id, optional: false }),
+    platformAdmins: {
+        user: r.one.users({ from: r.platformAdmins.userId, to: r.users.id, optional: false }),
+    },
+    tenants: {
+        memberships: r.many.tenantMemberships(),
+        roles: r.many.roles(),
+    },
+    tenantMemberships: {
+        tenant: r.one.tenants({ from: r.tenantMemberships.tenantId, to: r.tenants.id, optional: false }),
+        user: r.one.users({ from: r.tenantMemberships.userId, to: r.users.id, optional: false }),
+        roleAssignments: r.many.membershipRoles({
+            from: [r.tenantMemberships.tenantId, r.tenantMemberships.userId],
+            to: [r.membershipRoles.tenantId, r.membershipRoles.userId],
+        }),
+    },
+    membershipRoles: {
+        membership: r.one.tenantMemberships({
+            from: [r.membershipRoles.tenantId, r.membershipRoles.userId],
+            to: [r.tenantMemberships.tenantId, r.tenantMemberships.userId],
+            optional: false,
+        }),
+        role: r.one.roles({ from: r.membershipRoles.roleId, to: r.roles.id, optional: false }),
     },
     roles: {
-        users: r.many.userRoles(),
+        tenant: r.one.tenants({ from: r.roles.tenantId, to: r.tenants.id, optional: false }),
+        assignments: r.many.membershipRoles(),
         permissions: r.many.rolePermissions(),
     },
     rolePermissions: {

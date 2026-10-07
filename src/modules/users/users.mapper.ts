@@ -1,7 +1,7 @@
 import type { User, UserProfile } from "@/database/schema/users.js";
 import type { PermissionKey } from "@/common/authorization/permissions.constant.js";
 import type { AuthenticatedUser } from "@/common/types/authenticated-request.type.js";
-import type { UserWithRoles } from "@/modules/users/users.service.js";
+import type { UserWithProfile } from "@/modules/users/users.service.js";
 
 export type PublicUserProfile = Pick<UserProfile, "gender" | "bio"> & {
     /** Calendar date (YYYY-MM-DD) — it is stored as a `DATE`, so never expose a timestamp. */
@@ -40,28 +40,31 @@ export type CurrentUser = PublicUser & {
  * PermissionsGuard has already resolved the principal for this request, so the
  * permission set costs nothing extra to include here.
  */
-export function toCurrentUser(user: UserWithRoles, principal: AuthenticatedUser): CurrentUser {
+export function toCurrentUser(user: UserWithProfile, principal: AuthenticatedUser): CurrentUser {
     return {
-        ...toPublicUser(user),
+        ...toPublicUser(user, principal.roleIds),
         permissions: [...principal.permissions],
         maxRank: principal.maxRank,
     };
 }
 
-export function toPublicUser(user: UserWithRoles): PublicUser {
+/**
+ * `roleIds` are the user's role slugs *in the current tenant* — roles are not a
+ * property of the account, so the caller supplies them.
+ */
+export function toPublicUser(user: UserWithProfile, roleIds: string[] = []): PublicUser {
     const {
         password,
         twoFactorSecret: _twoFactorSecret,
         twoFactorRecoveryCodes: _twoFactorRecoveryCodes,
         twoFactorLastUsedStep: _twoFactorLastUsedStep,
-        roles,
         profile,
         ...publicUser
     } = user;
 
     return {
         ...publicUser,
-        roleIds: roles.map(({ roleId }) => roleId),
+        roleIds,
         profile: profile ? toPublicUserProfile(profile) : null,
         hasPassword: password !== null,
     };

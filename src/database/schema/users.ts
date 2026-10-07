@@ -16,8 +16,6 @@ export const users = pgTable("users", {
 
     status: userStatusEnum("status").notNull().default(UserStatus.PENDING_VERIFICATION),
 
-    /** Bumped whenever this user's roles or their permissions change; mismatched access tokens are rejected. */
-    permVersion: integer("perm_version").notNull().default(0),
     /** Bumped to kill every existing session (password change, global logout). */
     tokenVersion: integer("token_version").notNull().default(0),
 

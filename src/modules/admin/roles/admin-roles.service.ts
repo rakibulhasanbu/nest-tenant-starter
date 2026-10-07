@@ -5,16 +5,29 @@ import {
     Injectable,
     NotFoundException,
 } from "@nestjs/common";
-import { PERMISSION_CATALOG } from "@/common/authorization/permissions.constant.js";
-import type { AuthenticatedUser } from "@/common/types/authenticated-request.type.js";
 import { InjectDrizzle } from "@nestjs/drizzle";
-import { count, eq, inArray } from "drizzle-orm";
+import { and, count, eq, inArray } from "drizzle-orm";
+import { PERMISSION_CATALOG } from "@/common/authorization/permissions.constant.js";
+import { ROLE_SLUGS } from "@/common/authorization/role-templates.constant.js";
+import type { AuthenticatedUser } from "@/common/types/authenticated-request.type.js";
 import type { Database } from "@/database/database.type.js";
-import { permissions as permissionsTable, rolePermissions, roles, userRoles } from "@/database/schema/authorization.js";
+import {
+    membershipRoles,
+    permissions as permissionsTable,
+    rolePermissions,
+    roles,
+    type Role,
+} from "@/database/schema/authorization.js";
+import { PermissionLevel } from "@/database/schema/enums.js";
 import { PermissionsService } from "@/modules/authorization/permissions.service.js";
 import type { CreateRoleInput } from "@/modules/admin/roles/dto/create-role.schema.js";
 import type { UpdateRoleInput } from "@/modules/admin/roles/dto/update-role.schema.js";
 
+/**
+ * Role management for the current organization. Roles are per tenant, and the
+ * API addresses them by slug ("admin") — the tenant is implicit from the
+ * caller's session — so the contract is identical to the single-tenant one.
+ */
 @Injectable()
 export class AdminRolesService {
     constructor(
@@ -22,28 +35,27 @@ export class AdminRolesService {
         private readonly permissionsService: PermissionsService,
     ) {}
 
-    /** The catalog is served from code, not the table — the table only mirrors it. */
+    /** The catalog is served from code, not the table. Platform permissions are never offered to a tenant. */
     listPermissions() {
-        return PERMISSION_CATALOG;
+        return PERMISSION_CATALOG.filter(permission => permission.level === PermissionLevel.TENANT);
     }
 
-    async list() {
+    async list(actor: AuthenticatedUser) {
+        const tenantId = this.tenantOf(actor);
         const found = await this.db.query.roles.findMany({
+            where: { tenantId },
             orderBy: { rank: "desc" },
             with: { permissions: { columns: { permissionKey: true } } },
         });
-        const counts = await this.countUsersByRole();
+        const counts = await this.countUsersByRole(tenantId);
 
-        return found.map(({ permissions, ...role }) => ({
-            ...role,
-            permissions: permissions.map(({ permissionKey }) => permissionKey),
-            userCount: counts.get(role.id) ?? 0,
-        }));
+        return found.map(role => this.toView(role, role.permissions, counts.get(role.id) ?? 0));
     }
 
-    async getById(id: string) {
+    async getBySlug(actor: AuthenticatedUser, slug: string) {
+        const tenantId = this.tenantOf(actor);
         const role = await this.db.query.roles.findFirst({
-            where: { id },
+            where: { tenantId, slug },
             with: { permissions: { columns: { permissionKey: true } } },
         });
 
@@ -51,54 +63,61 @@ export class AdminRolesService {
             throw new NotFoundException("Role not found");
         }
 
-        const { permissions, ...rest } = role;
-        return {
-            ...rest,
-            permissions: permissions.map(({ permissionKey }) => permissionKey),
-            userCount: (await this.countUsersByRole(id)).get(id) ?? 0,
-        };
+        const counts = await this.countUsersByRole(tenantId, role.id);
+        return this.toView(role, role.permissions, counts.get(role.id) ?? 0);
     }
 
-    private async countUsersByRole(roleId?: string): Promise<Map<string, number>> {
+    private toView(role: Role, permissions: { permissionKey: string }[], userCount: number) {
+        const { id: _rowId, tenantId: _tenantId, slug, ...rest } = role;
+        return { id: slug, ...rest, permissions: permissions.map(({ permissionKey }) => permissionKey), userCount };
+    }
+
+    private async countUsersByRole(tenantId: string, roleId?: string): Promise<Map<string, number>> {
         const rows = await this.db
-            .select({ roleId: userRoles.roleId, total: count() })
-            .from(userRoles)
-            .where(roleId ? eq(userRoles.roleId, roleId) : undefined)
-            .groupBy(userRoles.roleId);
+            .select({ roleId: membershipRoles.roleId, total: count() })
+            .from(membershipRoles)
+            .where(and(eq(membershipRoles.tenantId, tenantId), roleId ? eq(membershipRoles.roleId, roleId) : undefined))
+            .groupBy(membershipRoles.roleId);
 
         return new Map(rows.map(row => [row.roleId, row.total]));
     }
 
     async create(actor: AuthenticatedUser, data: CreateRoleInput) {
+        const tenantId = this.tenantOf(actor);
         this.assertRankBelowActor(actor, data.rank);
         this.assertGrantable(actor, data.permissions);
 
-        if (await this.findRole(data.id)) {
+        if (await this.findRole(tenantId, data.id)) {
             throw new ConflictException("A role with this id already exists");
         }
 
         await this.assertPermissionsExist(data.permissions);
 
         await this.db.transaction(async tx => {
-            await tx.insert(roles).values({
-                id: data.id,
-                name: data.name,
-                description: data.description,
-                rank: data.rank,
-            });
+            const [role] = await tx
+                .insert(roles)
+                .values({
+                    tenantId,
+                    slug: data.id,
+                    name: data.name,
+                    description: data.description,
+                    rank: data.rank,
+                })
+                .returning({ id: roles.id });
 
             if (data.permissions.length > 0) {
                 await tx
                     .insert(rolePermissions)
-                    .values(data.permissions.map(permissionKey => ({ roleId: data.id, permissionKey })));
+                    .values(data.permissions.map(permissionKey => ({ tenantId, roleId: role!.id, permissionKey })));
             }
         });
 
-        return this.getById(data.id);
+        return this.getBySlug(actor, data.id);
     }
 
-    async update(actor: AuthenticatedUser, id: string, data: UpdateRoleInput) {
-        const role = await this.findRole(id);
+    async update(actor: AuthenticatedUser, slug: string, data: UpdateRoleInput) {
+        const tenantId = this.tenantOf(actor);
+        const role = await this.findRole(tenantId, slug);
 
         if (!role) {
             throw new NotFoundException("Role not found");
@@ -108,6 +127,10 @@ export class AdminRolesService {
         // permission sets stay editable, which is the whole point of storing them.
         if (role.isSystem && (data.name !== undefined || data.rank !== undefined)) {
             throw new ForbiddenException("A system role's name and rank cannot be changed");
+        }
+
+        if (role.slug === ROLE_SLUGS.OWNER && data.permissions) {
+            throw new ForbiddenException("The owner role always holds every permission");
         }
 
         this.assertManageableRole(actor, role);
@@ -125,28 +148,29 @@ export class AdminRolesService {
             await tx
                 .update(roles)
                 .set({ name: data.name, description: data.description, rank: data.rank, updatedAt: new Date() })
-                .where(eq(roles.id, id));
+                .where(and(eq(roles.id, role.id), eq(roles.tenantId, tenantId)));
 
             if (data.permissions) {
-                await tx.delete(rolePermissions).where(eq(rolePermissions.roleId, id));
+                await tx.delete(rolePermissions).where(eq(rolePermissions.roleId, role.id));
 
                 if (data.permissions.length > 0) {
                     await tx
                         .insert(rolePermissions)
-                        .values(data.permissions.map(permissionKey => ({ roleId: id, permissionKey })));
+                        .values(data.permissions.map(permissionKey => ({ tenantId, roleId: role.id, permissionKey })));
                 }
             }
         });
 
         // Everyone holding this role now has a different permission set, so every
         // access token they hold must be treated as stale.
-        await this.permissionsService.bumpPermVersionForRole(id);
+        await this.permissionsService.bumpPermVersionForRole(tenantId, role.id);
 
-        return this.getById(id);
+        return this.getBySlug(actor, slug);
     }
 
-    async remove(actor: AuthenticatedUser, id: string) {
-        const role = await this.findRole(id);
+    async remove(actor: AuthenticatedUser, slug: string) {
+        const tenantId = this.tenantOf(actor);
+        const role = await this.findRole(tenantId, slug);
 
         if (!role) {
             throw new NotFoundException("Role not found");
@@ -158,11 +182,11 @@ export class AdminRolesService {
 
         this.assertManageableRole(actor, role);
 
-        if ((await this.countUsersByRole(id)).get(id)) {
+        if ((await this.countUsersByRole(tenantId, role.id)).get(role.id)) {
             throw new ConflictException("Remove this role from all users before deleting it");
         }
 
-        await this.db.delete(roles).where(eq(roles.id, id));
+        await this.db.delete(roles).where(and(eq(roles.id, role.id), eq(roles.tenantId, tenantId)));
     }
 
     /**
@@ -170,14 +194,10 @@ export class AdminRolesService {
      *
      * A role the actor holds is always editable: `assertGrantable` already caps
      * its contents at what the actor themselves has, so this cannot lift their
-     * own ceiling. Requiring a strictly lower rank here instead left the super
-     * admin — rank 100, holding the rank-100 role — unable to edit the one role
-     * they own, even though the permission set is meant to stay editable.
-     *
-     * Every other role must still sit strictly below them.
+     * own ceiling. Every other role must sit strictly below them.
      */
-    private assertManageableRole(actor: AuthenticatedUser, role: { id: string; rank: number }): void {
-        if (actor.roleIds.includes(role.id)) {
+    private assertManageableRole(actor: AuthenticatedUser, role: { slug: string; rank: number }): void {
+        if (actor.roleIds.includes(role.slug)) {
             return;
         }
 
@@ -206,20 +226,35 @@ export class AdminRolesService {
         }
     }
 
-    private async findRole(id: string) {
-        const [role] = await this.db.select().from(roles).where(eq(roles.id, id)).limit(1);
+    private async findRole(tenantId: string, slug: string) {
+        const [role] = await this.db
+            .select()
+            .from(roles)
+            .where(and(eq(roles.tenantId, tenantId), eq(roles.slug, slug)))
+            .limit(1);
         return role;
     }
 
+    /** Only tenant-level permissions may live in a tenant's role; a platform key is rejected like an unknown one. */
     private async assertPermissionsExist(permissions: readonly string[]): Promise<void> {
         if (permissions.length === 0) {
             return;
         }
 
-        const found = await this.db.$count(permissionsTable, inArray(permissionsTable.key, [...permissions]));
+        const found = await this.db.$count(
+            permissionsTable,
+            and(inArray(permissionsTable.key, [...permissions]), eq(permissionsTable.level, PermissionLevel.TENANT)),
+        );
 
         if (found !== new Set(permissions).size) {
             throw new BadRequestException("One or more permissions do not exist");
         }
+    }
+
+    private tenantOf(actor: AuthenticatedUser): string {
+        if (!actor.tenantId) {
+            throw new ForbiddenException("This route needs an organization context");
+        }
+        return actor.tenantId;
     }
 }

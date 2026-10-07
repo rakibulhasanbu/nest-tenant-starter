@@ -4,8 +4,12 @@ import type {
     AccountLinkedMessage,
     DeleteAccountCodeMessage,
     EmailSender,
+    MembershipAddedMessage,
     ReactivateAccountMessage,
     ResetPasswordMessage,
+    TenantApprovedMessage,
+    TenantPendingApprovalMessage,
+    TenantRejectedMessage,
     VerifyEmailMessage,
 } from "@/integrations/email/email-sender.interface.js";
 
@@ -39,5 +43,25 @@ export class ConsoleEmailSender implements EmailSender {
             `[reactivate-account] to=${message.to} code=${message.code} ` +
                 `graceEndsAt=${message.graceEndsAt.toISOString()}`,
         );
+    }
+
+    async sendTenantPendingApproval(message: TenantPendingApprovalMessage): Promise<void> {
+        this.logger.log(
+            `[tenant-pending-approval] to=${message.to} tenant=${message.tenantSlug} owner=${message.ownerEmail}`,
+        );
+    }
+
+    async sendTenantApproved(message: TenantApprovedMessage): Promise<void> {
+        this.logger.log(`[tenant-approved] to=${message.to} tenant=${message.tenantName} url=${message.url}`);
+    }
+
+    async sendTenantRejected(message: TenantRejectedMessage): Promise<void> {
+        this.logger.log(
+            `[tenant-rejected] to=${message.to} tenant=${message.tenantName} reason=${message.reason ?? "-"}`,
+        );
+    }
+
+    async sendMembershipAdded(message: MembershipAddedMessage): Promise<void> {
+        this.logger.log(`[membership-added] to=${message.to} tenant=${message.tenantName} url=${message.url}`);
     }
 }

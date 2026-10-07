@@ -5,6 +5,7 @@ import helmet from "helmet";
 import { AllExceptionsFilter } from "@/common/filters/all-exceptions.filter.js";
 import { TransformResponseInterceptor } from "@/common/interceptors/transform-response.interceptor.js";
 import { buildCorsOptions } from "@/config/cors.config.js";
+import { TenantsService } from "@/modules/tenants/tenants.service.js";
 import type { Env } from "@/config/env.schema.js";
 
 /**
@@ -26,7 +27,7 @@ export function configureApp(app: NestExpressApplication): NestExpressApplicatio
     // X-Powered-By giveaway. Registered before CORS so it covers every response.
     app.use(helmet());
 
-    app.enableCors(buildCorsOptions(configService));
+    app.enableCors(buildCorsOptions(configService, app.get(TenantsService)));
 
     app.useGlobalFilters(new AllExceptionsFilter());
     app.useGlobalInterceptors(new TransformResponseInterceptor());

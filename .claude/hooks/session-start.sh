@@ -21,8 +21,8 @@ fi
 service postgresql start >/dev/null
 until pg_isready -q -h localhost -p 5432; do sleep 1; done
 su postgres -c "psql -q -c \"ALTER USER postgres PASSWORD 'postgres';\""
-if ! su postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname='nest_starter'\"" | grep -q 1; then
-  su postgres -c "createdb nest_starter"
+if ! su postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname='nest_tenant_starter'\"" | grep -q 1; then
+  su postgres -c "createdb nest_tenant_starter"
 fi
 
 # Redis
@@ -34,6 +34,5 @@ fi
 # Dependencies
 pnpm install
 
-# Schema + seed data (seed is upsert-based, safe to re-run)
-pnpm db:push --force
-pnpm db:seed
+# Schema + restricted app role + seed data (all safe to re-run)
+pnpm db:setup

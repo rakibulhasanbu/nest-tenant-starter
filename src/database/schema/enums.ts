@@ -42,3 +42,47 @@ export const Gender = {
 } as const;
 export type Gender = (typeof Gender)[keyof typeof Gender];
 export const genderEnum = pgEnum("gender", Object.values(Gender) as [Gender, ...Gender[]]);
+
+export const TenantStatus = {
+    PENDING_APPROVAL: "PENDING_APPROVAL",
+    ACTIVE: "ACTIVE",
+    REJECTED: "REJECTED",
+    SUSPENDED: "SUSPENDED",
+} as const;
+export type TenantStatus = (typeof TenantStatus)[keyof typeof TenantStatus];
+export const tenantStatusEnum = pgEnum(
+    "tenant_status",
+    Object.values(TenantStatus) as [TenantStatus, ...TenantStatus[]],
+);
+
+/** `pool` = shared schema with RLS (implemented); `silo` = dedicated database (reserved, not implemented). */
+export const TenantIsolation = {
+    POOL: "pool",
+    SILO: "silo",
+} as const;
+export type TenantIsolation = (typeof TenantIsolation)[keyof typeof TenantIsolation];
+export const tenantIsolationEnum = pgEnum(
+    "tenant_isolation",
+    Object.values(TenantIsolation) as [TenantIsolation, ...TenantIsolation[]],
+);
+
+/** A membership is either usable or suspended by the tenant; "invited" users are created with an ACTIVE membership. */
+export const MembershipStatus = {
+    ACTIVE: "ACTIVE",
+    SUSPENDED: "SUSPENDED",
+} as const;
+export type MembershipStatus = (typeof MembershipStatus)[keyof typeof MembershipStatus];
+export const membershipStatusEnum = pgEnum(
+    "membership_status",
+    Object.values(MembershipStatus) as [MembershipStatus, ...MembershipStatus[]],
+);
+
+export const PermissionLevel = {
+    TENANT: "tenant",
+    PLATFORM: "platform",
+} as const;
+export type PermissionLevel = (typeof PermissionLevel)[keyof typeof PermissionLevel];
+export const permissionLevelEnum = pgEnum(
+    "permission_level",
+    Object.values(PermissionLevel) as [PermissionLevel, ...PermissionLevel[]],
+);

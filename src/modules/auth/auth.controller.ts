@@ -1,11 +1,12 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Post, Req } from "@nestjs/common";
 import { Throttle } from "@nestjs/throttler";
 import type { Request } from "express";
+import type { RequestWithHost } from "@/common/types/host-context.type.js";
 import { CurrentUser } from "@/common/decorators/current-user.decorator.js";
 import { AuthenticatedOnly } from "@/common/decorators/authenticated-only.decorator.js";
 import { Public } from "@/common/decorators/public.decorator.js";
 import type { AuthenticatedUser } from "@/common/types/authenticated-request.type.js";
-import { AuthService } from "@/modules/auth/auth.service.js";
+import { AuthService, type LoginContext } from "@/modules/auth/auth.service.js";
 import { SignupDto } from "@/modules/auth/dto/signup.schema.js";
 import { SigninDto } from "@/modules/auth/dto/signin.schema.js";
 import { RefreshTokenDto } from "@/modules/auth/dto/refresh-token.schema.js";
@@ -21,6 +22,23 @@ import { DeleteAccountDto } from "@/modules/auth/dto/delete-account.schema.js";
 import { TwoFactorEnableDto } from "@/modules/auth/dto/two-factor-enable.schema.js";
 import { TwoFactorDisableDto } from "@/modules/auth/dto/two-factor-disable.schema.js";
 import { TwoFactorLoginVerifyDto } from "@/modules/auth/dto/two-factor-login-verify.schema.js";
+import { SelectTenantDto } from "@/modules/auth/dto/select-tenant.schema.js";
+import { SwitchTenantDto } from "@/modules/auth/dto/switch-tenant.schema.js";
+import { ExchangeCodeDto } from "@/modules/auth/dto/exchange-code.schema.js";
+
+/**
+ * Who is calling and from which host. The host's tenant (set by the host
+ * middleware) is the authority for tenant subdomains; `tenantSlug` is the
+ * fallback for clients that have no subdomain.
+ */
+function loginContext(req: Request, tenantSlug?: string): LoginContext {
+    const host = (req as RequestWithHost).hostContext ?? { kind: "apex", tenant: null };
+    return {
+        userAgent: req.headers["user-agent"],
+        ipAddress: req.ip,
+        target: { host, tenantSlug },
+    };
+}
 
 @Controller("auth")
 export class AuthController {
@@ -38,18 +56,50 @@ export class AuthController {
     @HttpCode(HttpStatus.OK)
     @Post("signin")
     signin(@Body() dto: SigninDto, @Req() req: Request) {
-        return this.authService.signin(dto, { userAgent: req.headers["user-agent"], ipAddress: req.ip });
+        return this.authService.signin(dto, loginContext(req, dto.tenantSlug));
     }
 
     @Public()
     @HttpCode(HttpStatus.OK)
     @Post("refresh")
     refresh(@Body() dto: RefreshTokenDto, @Req() req: Request) {
-        return this.authService.refresh(
-            dto.refreshToken,
-            { userAgent: req.headers["user-agent"], ipAddress: req.ip },
-            { deviceType: dto.deviceType, deviceName: dto.deviceName },
-        );
+        return this.authService.refresh(dto.refreshToken, loginContext(req), {
+            deviceType: dto.deviceType,
+            deviceName: dto.deviceName,
+        });
+    }
+
+    /** Second step after signin returned a tenant picker. */
+    @Public()
+    @Throttle({ default: { limit: 10, ttl: 60_000 } })
+    @HttpCode(HttpStatus.OK)
+    @Post("select-tenant")
+    selectTenant(@Body() dto: SelectTenantDto, @Req() req: Request) {
+        return this.authService.selectTenant(dto.selectionToken, dto.tenantSlug, loginContext(req), {
+            deviceType: dto.deviceType,
+            deviceName: dto.deviceName,
+        });
+    }
+
+    /** Signed-in user asks to move to another of their organizations; returns a one-time code for that host. */
+    @AuthenticatedOnly()
+    @Throttle({ default: { limit: 20, ttl: 60_000 } })
+    @HttpCode(HttpStatus.OK)
+    @Post("switch-tenant")
+    switchTenant(@CurrentUser() currentUser: AuthenticatedUser, @Body() dto: SwitchTenantDto) {
+        return this.authService.createTenantSwitch(currentUser.id, dto.tenantSlug);
+    }
+
+    /** Redeems the code from switch-tenant on the target host. */
+    @Public()
+    @Throttle({ default: { limit: 20, ttl: 60_000 } })
+    @HttpCode(HttpStatus.OK)
+    @Post("exchange")
+    exchange(@Body() dto: ExchangeCodeDto, @Req() req: Request) {
+        return this.authService.exchange(dto.code, loginContext(req), {
+            deviceType: dto.deviceType,
+            deviceName: dto.deviceName,
+        });
     }
 
     @Public()
@@ -63,12 +113,10 @@ export class AuthController {
     @HttpCode(HttpStatus.OK)
     @Post("verify-email")
     verifyEmail(@Body() dto: VerifyEmailDto, @Req() req: Request) {
-        return this.authService.verifyEmail(
-            dto.email,
-            dto.code,
-            { userAgent: req.headers["user-agent"], ipAddress: req.ip },
-            { deviceType: dto.deviceType, deviceName: dto.deviceName },
-        );
+        return this.authService.verifyEmail(dto.email, dto.code, loginContext(req, dto.tenantSlug), {
+            deviceType: dto.deviceType,
+            deviceName: dto.deviceName,
+        });
     }
 
     @Public()
@@ -104,13 +152,10 @@ export class AuthController {
     @HttpCode(HttpStatus.OK)
     @Post("reset-password")
     resetPassword(@Body() dto: ResetPasswordDto, @Req() req: Request) {
-        return this.authService.resetPassword(
-            dto.email,
-            dto.code,
-            dto.password,
-            { userAgent: req.headers["user-agent"], ipAddress: req.ip },
-            { deviceType: dto.deviceType, deviceName: dto.deviceName },
-        );
+        return this.authService.resetPassword(dto.email, dto.code, dto.password, loginContext(req, dto.tenantSlug), {
+            deviceType: dto.deviceType,
+            deviceName: dto.deviceName,
+        });
     }
 
     @Public()
@@ -118,10 +163,7 @@ export class AuthController {
     @HttpCode(HttpStatus.OK)
     @Post("google")
     googleLogin(@Body() dto: GoogleLoginDto, @Req() req: Request) {
-        return this.authService.loginWithGoogle(dto.idToken, {
-            userAgent: req.headers["user-agent"],
-            ipAddress: req.ip,
-        });
+        return this.authService.loginWithGoogle(dto.idToken, loginContext(req, dto.tenantSlug), dto.newTenant);
     }
 
     @AuthenticatedOnly()
@@ -203,7 +245,7 @@ export class AuthController {
             dto.twoFactorToken,
             dto.code,
             dto.recoveryCode,
-            { userAgent: req.headers["user-agent"], ipAddress: req.ip },
+            loginContext(req, dto.tenantSlug),
             { deviceType: dto.deviceType, deviceName: dto.deviceName },
         );
     }

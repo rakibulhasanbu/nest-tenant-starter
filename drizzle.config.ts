@@ -6,6 +6,7 @@ export default defineConfig({
     schema: "./src/database/schema",
     out: "./src/database/migrations",
     dbCredentials: {
-        url: process.env.DATABASE_URL!,
+        // Migrations need the table-owner role; the app itself runs as the restricted app_user.
+        url: (process.env.DATABASE_ADMIN_URL ?? process.env.DATABASE_URL)!,
     },
 });

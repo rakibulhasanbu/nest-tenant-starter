@@ -1,9 +1,9 @@
 import { z } from "zod";
 import { createZodDto } from "nestjs-zod";
-import { UserStatus } from "@/database/schema/enums.js";
+import { MembershipStatus } from "@/database/schema/enums.js";
 
 export const updateStatusSchema = z.strictObject({
-    status: z.enum([UserStatus.ACTIVE, UserStatus.SUSPENDED]),
+    status: z.enum([MembershipStatus.ACTIVE, MembershipStatus.SUSPENDED]),
 });
 
 export type UpdateStatusInput = z.infer<typeof updateStatusSchema>;

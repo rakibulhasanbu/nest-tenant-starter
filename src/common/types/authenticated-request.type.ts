@@ -10,9 +10,14 @@ import type { PermissionKey } from "@/common/authorization/permissions.constant.
 export interface AuthenticatedUser {
     id: string;
     email: string;
+    /** The tenant this request acts in. `null` for the super admin on the platform host. */
+    tenantId: string | null;
+    /** True for the single super admin acting through the platform console. */
+    isPlatform: boolean;
+    /** Role slugs within the tenant. Empty for the platform principal. */
     roleIds: string[];
     permissions: ReadonlySet<PermissionKey>;
-    /** Highest rank across the user's roles. An actor may only manage users ranked below them. */
+    /** Highest rank across the member's roles in this tenant. An actor may only manage users ranked below them. */
     maxRank: number;
     /**
      * Which session this request came from (the refresh-token family id), so a

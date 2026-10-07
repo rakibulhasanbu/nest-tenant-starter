@@ -2,12 +2,12 @@ import { BadRequestException, ConflictException, UnauthorizedException } from "@
 import * as argon2 from "argon2";
 import { AuthService } from "@/modules/auth/auth.service.js";
 import { EmailTokenType, UserStatus } from "@/database/schema/enums.js";
-import type { UserWithRoles } from "@/modules/users/users.service.js";
+import type { UserWithProfile } from "@/modules/users/users.service.js";
 
 const CORRECT_PASSWORD = "correct-horse-battery";
 const DELETED_AT = new Date("2026-09-20T00:00:00.000Z");
 
-async function buildDeletedUser(overrides: Partial<UserWithRoles> = {}): Promise<UserWithRoles> {
+async function buildDeletedUser(overrides: Partial<UserWithProfile> = {}): Promise<UserWithProfile> {
     return {
         id: "usr_1",
         email: "gone@example.com",
@@ -16,15 +16,13 @@ async function buildDeletedUser(overrides: Partial<UserWithRoles> = {}): Promise
         deletedAt: DELETED_AT,
         lockedUntil: null,
         twoFactorEnabled: false,
-        permVersion: 0,
         tokenVersion: 0,
-        roles: [],
         profile: null,
         ...overrides,
-    } as unknown as UserWithRoles;
+    } as unknown as UserWithProfile;
 }
 
-function buildService(user: UserWithRoles | null) {
+function buildService(user: UserWithProfile | null) {
     const usersService = {
         findByEmail: vi.fn().mockResolvedValue(user),
         createUser: vi.fn(),
@@ -50,6 +48,8 @@ function buildService(user: UserWithRoles | null) {
         permissionsService as never,
         configService as never,
         emailSender as never,
+        {} as never,
+        {} as never,
     );
 
     return { service, usersService, emailTokensService, emailSender, permissionsService };

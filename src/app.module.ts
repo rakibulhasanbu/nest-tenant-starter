@@ -1,13 +1,16 @@
-import { Module } from "@nestjs/common";
+import { Module, RequestMethod, type MiddlewareConsumer, type NestModule } from "@nestjs/common";
 import { APP_GUARD, APP_PIPE } from "@nestjs/core";
 import { ConfigModule, ConfigService } from "@nestjs/config";
 import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
+import { EventEmitterModule } from "@nestjs/event-emitter";
 import { ScheduleModule } from "@nestjs/schedule";
 import { ZodValidationPipe } from "nestjs-zod";
 import { validateEnv, type Env } from "@/config/env.schema.js";
 import { DrizzleModule } from "@nestjs/drizzle";
 import { drizzle } from "drizzle-orm/node-postgres";
+import { TenantAwarePool } from "@/database/tenant-aware-pool.js";
 import { relations } from "@/database/schema/relations.js";
+import { TenantContextModule } from "@/common/tenant/tenant-context.module.js";
 import { RedisModule } from "@/integrations/redis/redis.module.js";
 import { RedisService } from "@/integrations/redis/redis.service.js";
 import { RedisThrottlerStorage } from "@/integrations/redis/redis-throttler.storage.js";
@@ -17,6 +20,9 @@ import { AuthorizationModule } from "@/modules/authorization/authorization.modul
 import { UsersModule } from "@/modules/users/users.module.js";
 import { AdminUsersModule } from "@/modules/admin/users/admin-users.module.js";
 import { AdminRolesModule } from "@/modules/admin/roles/admin-roles.module.js";
+import { TenantsModule } from "@/modules/tenants/tenants.module.js";
+import { PlatformModule } from "@/modules/platform/platform.module.js";
+import { TenantHostMiddleware } from "@/modules/tenants/tenant-host.middleware.js";
 import { JwtAuthGuard } from "@/common/guards/jwt-auth.guard.js";
 import { PermissionsGuard } from "@/common/guards/permissions.guard.js";
 
@@ -35,16 +41,22 @@ import { PermissionsGuard } from "@/common/guards/permissions.guard.js";
             }),
         }),
         ScheduleModule.forRoot(),
+        // Domain events (tenant.created, ...) — in-process now, the seam for a message broker later.
+        EventEmitterModule.forRoot(),
+        // The pool stamps every connection with the request's tenant so Postgres RLS can enforce isolation.
         DrizzleModule.forRootAsync({
             inject: [ConfigService],
-            useFactory: (config: ConfigService<Env, true>) => ({
-                drizzle,
-                connection: config.get("DATABASE_URL", { infer: true }),
-                relations,
-            }),
+            useFactory: (config: ConfigService<Env, true>) => {
+                const pool = new TenantAwarePool({ connectionString: config.get("DATABASE_URL", { infer: true }) });
+                pool.on("error", error => console.error("Unexpected database pool error", error.message));
+                return { db: drizzle({ client: pool, relations }) };
+            },
         }),
         RedisModule,
+        TenantContextModule,
         AuthorizationModule,
+        TenantsModule,
+        PlatformModule,
         HealthModule,
         AuthModule,
         UsersModule,
@@ -62,4 +74,9 @@ import { PermissionsGuard } from "@/common/guards/permissions.guard.js";
         { provide: APP_GUARD, useClass: PermissionsGuard },
     ],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+    configure(consumer: MiddlewareConsumer): void {
+        // Opens the request's tenant scope and resolves the host's tenant before any guard runs.
+        consumer.apply(TenantHostMiddleware).forRoutes({ path: "*path", method: RequestMethod.ALL });
+    }
+}

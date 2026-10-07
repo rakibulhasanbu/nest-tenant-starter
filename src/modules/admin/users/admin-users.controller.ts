@@ -4,7 +4,6 @@ import { CurrentUser } from "@/common/decorators/current-user.decorator.js";
 import { RequirePermissions } from "@/common/decorators/require-permissions.decorator.js";
 import type { AuthenticatedUser } from "@/common/types/authenticated-request.type.js";
 import { AdminUsersService } from "@/modules/admin/users/admin-users.service.js";
-import { AdminUpdateUserDto } from "@/modules/admin/users/dto/admin-update-user.schema.js";
 import { AssignRolesDto } from "@/modules/admin/users/dto/assign-roles.schema.js";
 import { InviteUserDto } from "@/modules/admin/users/dto/invite-user.schema.js";
 import { ListUsersDto } from "@/modules/admin/users/dto/list-users.schema.js";
@@ -26,12 +25,6 @@ export class AdminUsersController {
         return this.adminUsersService.getById(actor, id);
     }
 
-    @RequirePermissions(PERMISSIONS.USER_UPDATE_ANY)
-    @Patch(":id")
-    update(@CurrentUser() actor: AuthenticatedUser, @Param("id") id: string, @Body() dto: AdminUpdateUserDto) {
-        return this.adminUsersService.update(actor, id, dto);
-    }
-
     @RequirePermissions(PERMISSIONS.ROLE_ASSIGN)
     @Patch(":id/roles")
     assignRoles(@CurrentUser() actor: AuthenticatedUser, @Param("id") id: string, @Body() dto: AssignRolesDto) {
@@ -42,16 +35,6 @@ export class AdminUsersController {
     @Patch(":id/status")
     updateStatus(@CurrentUser() actor: AuthenticatedUser, @Param("id") id: string, @Body() dto: UpdateStatusDto) {
         return this.adminUsersService.updateStatus(actor, id, dto.status);
-    }
-
-    /**
-     * Deletion is self-service only, so this is a support tool: it undoes a
-     * deletion the owner asked for, never one an admin performed.
-     */
-    @RequirePermissions(PERMISSIONS.USER_RESTORE_ANY)
-    @Post(":id/restore")
-    restore(@CurrentUser() actor: AuthenticatedUser, @Param("id") id: string) {
-        return this.adminUsersService.restore(actor, id);
     }
 
     @RequirePermissions(PERMISSIONS.USER_PASSWORD_RESET_ANY)

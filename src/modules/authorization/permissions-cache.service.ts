@@ -2,9 +2,13 @@ import { Injectable, Logger, type OnModuleInit } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import type { Env } from "@/config/env.schema.js";
 import {
+    invalidateKeyMessage,
+    invalidateUserMessage,
+    l1Key,
     PERM_INVALIDATE_ALL,
     PERM_INVALIDATION_CHANNEL,
     permCacheKey,
+    permCachePatternForUser,
 } from "@/common/authorization/permission-cache-keys.constant.js";
 import { RedisService } from "@/integrations/redis/redis.service.js";
 import {
@@ -50,69 +54,117 @@ export class PermissionsCacheService implements OnModuleInit {
     }
 
     async onModuleInit(): Promise<void> {
-        await this.redis.subscribe(PERM_INVALIDATION_CHANNEL, userId => {
-            if (userId === PERM_INVALIDATE_ALL) {
+        await this.redis.subscribe(PERM_INVALIDATION_CHANNEL, message => {
+            if (message === PERM_INVALIDATE_ALL) {
                 this.l1.clear();
-                return;
+            } else if (message.startsWith("k:")) {
+                this.l1.delete(message.slice(2));
+            } else if (message.startsWith("u:")) {
+                this.dropUserFromL1(message.slice(2));
             }
-            this.l1.delete(userId);
         });
     }
 
-    async get(userId: string): Promise<ResolvedPrincipal | null> {
-        const entry = this.l1.get(userId);
+    async get(tenantId: string, userId: string): Promise<ResolvedPrincipal | null> {
+        const key = l1Key(tenantId, userId);
+        const entry = this.l1.get(key);
 
         if (entry) {
             if (entry.expiresAt > Date.now()) {
                 return entry.principal;
             }
-            this.l1.delete(userId);
+            this.l1.delete(key);
         }
 
-        const principal = await this.readFromRedis(userId);
+        const principal = await this.readFromRedis(tenantId, userId);
 
         if (principal) {
-            this.writeToL1(userId, principal);
+            this.writeToL1(key, principal);
         }
 
         return principal;
     }
 
     async set(principal: ResolvedPrincipal): Promise<void> {
-        this.writeToL1(principal.userId, principal);
+        this.writeToL1(l1Key(principal.tenantId, principal.userId), principal);
 
         if (!this.redis.isAvailable) {
             return;
         }
 
         await this.redis.client
-            .set(permCacheKey(principal.userId), JSON.stringify(serializePrincipal(principal)), "EX", this.l2TtlSeconds)
+            .set(
+                permCacheKey(principal.tenantId, principal.userId),
+                JSON.stringify(serializePrincipal(principal)),
+                "EX",
+                this.l2TtlSeconds,
+            )
             .catch((error: Error) => this.logger.warn(`Permission cache write failed: ${error.message}`));
     }
 
-    /** Drops the user from every layer on every instance. Safe to call when Redis is down. */
-    async invalidate(userId: string): Promise<void> {
-        this.l1.delete(userId);
+    /** Drops one member's entry in one tenant from every layer on every instance. Safe when Redis is down. */
+    async invalidate(tenantId: string, userId: string): Promise<void> {
+        this.l1.delete(l1Key(tenantId, userId));
 
         if (this.redis.isAvailable) {
             await this.redis.client
-                .del(permCacheKey(userId))
+                .del(permCacheKey(tenantId, userId))
                 .catch((error: Error) => this.logger.warn(`Permission cache delete failed: ${error.message}`));
         }
 
-        await this.redis.publish(PERM_INVALIDATION_CHANNEL, userId);
+        await this.redis.publish(PERM_INVALIDATION_CHANNEL, invalidateKeyMessage(tenantId, userId));
     }
 
-    async invalidateMany(userIds: readonly string[]): Promise<void> {
-        await Promise.all(userIds.map(userId => this.invalidate(userId)));
+    /**
+     * Drops every tenant's entry for a user — for changes that are global to the
+     * account (password change, suspension, deletion) rather than to one membership.
+     */
+    async invalidateUser(userId: string): Promise<void> {
+        this.dropUserFromL1(userId);
+
+        if (this.redis.isAvailable) {
+            try {
+                let cursor = "0";
+                do {
+                    const [next, keys] = await this.redis.client.scan(
+                        cursor,
+                        "MATCH",
+                        permCachePatternForUser(userId),
+                        "COUNT",
+                        200,
+                    );
+                    cursor = next;
+                    if (keys.length > 0) {
+                        await this.redis.client.del(...keys);
+                    }
+                } while (cursor !== "0");
+            } catch (error) {
+                this.logger.warn(`Permission cache user sweep failed: ${(error as Error).message}`);
+            }
+        }
+
+        await this.redis.publish(PERM_INVALIDATION_CHANNEL, invalidateUserMessage(userId));
     }
 
-    private async readFromRedis(userId: string): Promise<ResolvedPrincipal | null> {
+    async invalidateMany(tenantId: string, userIds: readonly string[]): Promise<void> {
+        await Promise.all(userIds.map(userId => this.invalidate(tenantId, userId)));
+    }
+
+    private dropUserFromL1(userId: string): void {
+        const suffix = `:${userId}`;
+        for (const key of this.l1.keys()) {
+            if (key.endsWith(suffix)) {
+                this.l1.delete(key);
+            }
+        }
+    }
+
+    private async readFromRedis(tenantId: string, userId: string): Promise<ResolvedPrincipal | null> {
         if (!this.redis.isAvailable) {
             return null;
         }
 
-        const raw = await this.redis.client.get(permCacheKey(userId)).catch(() => null);
+        const raw = await this.redis.client.get(permCacheKey(tenantId, userId)).catch(() => null);
 
         if (!raw) {
             return null;
@@ -126,16 +178,16 @@ export class PermissionsCacheService implements OnModuleInit {
         }
     }
 
-    private writeToL1(userId: string, principal: ResolvedPrincipal): void {
+    private writeToL1(key: string, principal: ResolvedPrincipal): void {
         // Evict the oldest entry once full — Map preserves insertion order, so the
         // first key is the least recently written. This bounds memory; it is not an LRU.
-        if (this.l1.size >= this.l1MaxEntries && !this.l1.has(userId)) {
+        if (this.l1.size >= this.l1MaxEntries && !this.l1.has(key)) {
             const oldest = this.l1.keys().next();
             if (!oldest.done) {
                 this.l1.delete(oldest.value);
             }
         }
 
-        this.l1.set(userId, { principal, expiresAt: Date.now() + this.l1TtlMs });
+        this.l1.set(key, { principal, expiresAt: Date.now() + this.l1TtlMs });
     }
 }

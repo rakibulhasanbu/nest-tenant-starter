@@ -1,7 +1,7 @@
-import type { UserWithRoles } from "@/modules/users/users.service.js";
+import type { UserWithProfile } from "@/modules/users/users.service.js";
 import { toPublicUser } from "@/modules/users/users.mapper.js";
 
-function buildUser(overrides: Partial<UserWithRoles> = {}): UserWithRoles {
+function buildUser(overrides: Partial<UserWithProfile> = {}): UserWithProfile {
     return {
         id: "usr_1",
         email: "a@example.com",
@@ -9,10 +9,9 @@ function buildUser(overrides: Partial<UserWithRoles> = {}): UserWithRoles {
         twoFactorSecret: "TOTPSECRET",
         twoFactorRecoveryCodes: ["hash1", "hash2"],
         twoFactorLastUsedStep: 12345,
-        roles: [{ roleId: "role_admin" }, { roleId: "role_user" }],
         profile: null,
         ...overrides,
-    } as unknown as UserWithRoles;
+    } as unknown as UserWithProfile;
 }
 
 describe("toPublicUser", () => {
@@ -26,8 +25,9 @@ describe("toPublicUser", () => {
         expect(JSON.stringify(publicUser)).not.toContain("argon2id");
     });
 
-    it("flattens roles to ids", () => {
-        expect(toPublicUser(buildUser()).roleIds).toEqual(["role_admin", "role_user"]);
+    it("reports the role slugs of the tenant it was asked about, not anything on the account", () => {
+        expect(toPublicUser(buildUser(), ["admin", "user"]).roleIds).toEqual(["admin", "user"]);
+        expect(toPublicUser(buildUser()).roleIds).toEqual([]);
     });
 
     it("exposes dateOfBirth as a calendar date, never a timestamp", () => {
@@ -38,7 +38,7 @@ describe("toPublicUser", () => {
                     gender: "MALE",
                     bio: "hi",
                 },
-            } as unknown as Partial<UserWithRoles>),
+            } as unknown as Partial<UserWithProfile>),
         );
 
         expect(publicUser.profile).toEqual({ dateOfBirth: "1995-03-14", gender: "MALE", bio: "hi" });

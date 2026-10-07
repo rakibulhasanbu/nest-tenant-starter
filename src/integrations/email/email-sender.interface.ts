@@ -30,6 +30,33 @@ export interface AccountDeletedMessage {
     graceDays: number;
 }
 
+/** Sent to the super admin when a tenant is waiting for approval. */
+export interface TenantPendingApprovalMessage {
+    to: string;
+    tenantName: string;
+    tenantSlug: string;
+    ownerEmail: string;
+}
+
+export interface TenantApprovedMessage {
+    to: string;
+    tenantName: string;
+    url: string;
+}
+
+export interface TenantRejectedMessage {
+    to: string;
+    tenantName: string;
+    reason: string | null;
+}
+
+/** Sent to an existing account that was added to a tenant. */
+export interface MembershipAddedMessage {
+    to: string;
+    tenantName: string;
+    url: string;
+}
+
 export const EMAIL_SENDER = Symbol("EMAIL_SENDER");
 
 /**
@@ -43,4 +70,8 @@ export interface EmailSender {
     sendDeleteAccountCode(message: DeleteAccountCodeMessage): Promise<void>;
     sendAccountDeleted(message: AccountDeletedMessage): Promise<void>;
     sendReactivateAccount(message: ReactivateAccountMessage): Promise<void>;
+    sendTenantPendingApproval(message: TenantPendingApprovalMessage): Promise<void>;
+    sendTenantApproved(message: TenantApprovedMessage): Promise<void>;
+    sendTenantRejected(message: TenantRejectedMessage): Promise<void>;
+    sendMembershipAdded(message: MembershipAddedMessage): Promise<void>;
 }

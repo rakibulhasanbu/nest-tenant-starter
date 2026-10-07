@@ -1,32 +1,27 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
 import { InjectDrizzle } from "@nestjs/drizzle";
-import { and, desc, eq, exists, gte, ilike, isNotNull, isNull, lt, notExists, or, sql } from "drizzle-orm";
-import { SYSTEM_ROLE_IDS } from "@/common/authorization/system-roles.constant.js";
-import { toLimitOffset } from "@/common/utils/pagination.util.js";
+import { eq, lt } from "drizzle-orm";
 import type { Database } from "@/database/database.type.js";
 import { Gender, UserStatus } from "@/database/schema/enums.js";
 import { notificationPreferences, userProfiles, users, type User, type UserProfile } from "@/database/schema/users.js";
-import { roles, userRoles } from "@/database/schema/authorization.js";
 import type { UpdateNotificationPreferencesInput } from "@/modules/users/dto/update-notification-preferences.schema.js";
 
 /**
- * Role ids and the optional profile travel with every user this service returns
- * so callers never have to issue a second query to render or authorize against them.
+ * The optional profile travels with every user this service returns so callers
+ * never need a second query to render it. Users are global identities: roles
+ * belong to a tenant membership and are looked up per tenant, never here.
  */
-export type UserWithRoles = User & {
-    roles: { roleId: string }[];
+export type UserWithProfile = User & {
     profile: UserProfile | null;
 };
 
-const withRoles = { roles: { columns: { roleId: true } }, profile: true } as const;
+const withProfile = { profile: true } as const;
 
 export interface CreateUserData {
     email: string;
     passwordHash?: string;
     name?: string;
     phone?: string;
-    /** Extra roles on top of the baseline `user` role every account receives. */
-    roleIds?: string[];
     status?: UserStatus;
     emailVerifiedAt?: Date;
 }
@@ -69,15 +64,15 @@ const notificationPreferencesColumns = {
 export class UsersService {
     constructor(@InjectDrizzle() private readonly db: Database) {}
 
-    async findByEmail(email: string): Promise<UserWithRoles | null> {
-        return (await this.db.query.users.findFirst({ where: { email }, with: withRoles })) ?? null;
+    async findByEmail(email: string): Promise<UserWithProfile | null> {
+        return (await this.db.query.users.findFirst({ where: { email }, with: withProfile })) ?? null;
     }
 
-    async findById(id: string): Promise<UserWithRoles | null> {
-        return (await this.db.query.users.findFirst({ where: { id }, with: withRoles })) ?? null;
+    async findById(id: string): Promise<UserWithProfile | null> {
+        return (await this.db.query.users.findFirst({ where: { id }, with: withProfile })) ?? null;
     }
 
-    async findByIdOrThrow(id: string): Promise<UserWithRoles> {
+    async findByIdOrThrow(id: string): Promise<UserWithProfile> {
         const user = await this.findById(id);
 
         if (!user) {
@@ -87,40 +82,42 @@ export class UsersService {
         return user;
     }
 
-    async findActiveById(id: string): Promise<UserWithRoles | null> {
+    /** Loads several users in one query, keyed by id — for assembling a page of members. */
+    async findManyByIds(ids: string[]): Promise<Map<string, UserWithProfile>> {
+        if (ids.length === 0) {
+            return new Map();
+        }
+
+        const found = await this.db.query.users.findMany({ where: { id: { in: ids } }, with: withProfile });
+        return new Map(found.map(user => [user.id, user]));
+    }
+
+    async findActiveById(id: string): Promise<UserWithProfile | null> {
         const user = await this.findById(id);
         return user && !user.deletedAt ? user : null;
     }
 
     /**
-     * Every account gets the baseline `user` role, created in the same transaction
-     * so an account can never exist without a role — a roleless user would resolve
-     * to an empty permission set and silently fail every authorization check.
+     * Creates the global identity only. Access comes from a tenant membership,
+     * which the caller creates (signup makes a tenant, an invite adds a membership).
      */
-    async createUser(data: CreateUserData): Promise<UserWithRoles> {
+    async createUser(data: CreateUserData): Promise<UserWithProfile> {
         const username = await this.generateUniqueUsername(data.email);
-        const roleIds = [...new Set([SYSTEM_ROLE_IDS.USER, ...(data.roleIds ?? [])])];
 
-        const userId = await this.db.transaction(async tx => {
-            const [created] = await tx
-                .insert(users)
-                .values({
-                    email: data.email,
-                    username,
-                    password: data.passwordHash,
-                    name: data.name,
-                    phone: data.phone,
-                    status: data.status,
-                    emailVerifiedAt: data.emailVerifiedAt,
-                })
-                .returning({ id: users.id });
+        const [created] = await this.db
+            .insert(users)
+            .values({
+                email: data.email,
+                username,
+                password: data.passwordHash,
+                name: data.name,
+                phone: data.phone,
+                status: data.status,
+                emailVerifiedAt: data.emailVerifiedAt,
+            })
+            .returning({ id: users.id });
 
-            await tx.insert(userRoles).values(roleIds.map(roleId => ({ userId: created!.id, roleId })));
-
-            return created!.id;
-        });
-
-        return this.findByIdOrThrow(userId);
+        return this.findByIdOrThrow(created!.id);
     }
 
     /** Derives a unique handle from the email local-part, suffixing on collision. */
@@ -152,7 +149,7 @@ export class UsersService {
      * Applies `values` to one user and returns the refreshed record. `updatedAt`
      * is always written so an update with nothing to change is still valid SQL.
      */
-    private async updateUser(id: string, values: Partial<typeof users.$inferInsert>): Promise<UserWithRoles> {
+    private async updateUser(id: string, values: Partial<typeof users.$inferInsert>): Promise<UserWithProfile> {
         const [updated] = await this.db
             .update(users)
             .set({ ...values, updatedAt: new Date() })
@@ -172,7 +169,7 @@ export class UsersService {
      * password-reset flows, so unconditionally writing ACTIVE would turn either
      * flow into a way for a suspended user to lift their own suspension.
      */
-    async markEmailVerified(id: string): Promise<UserWithRoles> {
+    async markEmailVerified(id: string): Promise<UserWithProfile> {
         const current = await this.findByIdOrThrow(id);
 
         return this.updateUser(id, {
@@ -181,7 +178,7 @@ export class UsersService {
         });
     }
 
-    setPassword(id: string, passwordHash: string): Promise<UserWithRoles> {
+    setPassword(id: string, passwordHash: string): Promise<UserWithProfile> {
         return this.updateUser(id, { password: passwordHash });
     }
 
@@ -189,7 +186,7 @@ export class UsersService {
      * Account fields and profile fields land in two tables, so the profile row is
      * upserted: it is created lazily the first time a user fills anything in.
      */
-    async updateProfile(id: string, data: UpdateProfileData): Promise<UserWithRoles> {
+    async updateProfile(id: string, data: UpdateProfileData): Promise<UserWithProfile> {
         const { profile, ...account } = data;
 
         await this.findByIdOrThrow(id);
@@ -244,7 +241,7 @@ export class UsersService {
         return saved!;
     }
 
-    async recordFailedLogin(id: string, maxAttempts: number, lockoutMinutes: number): Promise<UserWithRoles> {
+    async recordFailedLogin(id: string, maxAttempts: number, lockoutMinutes: number): Promise<UserWithProfile> {
         const user = await this.findByIdOrThrow(id);
         const attempts = user.failedLoginAttempts + 1;
         const shouldLock = attempts >= maxAttempts;
@@ -255,103 +252,19 @@ export class UsersService {
         });
     }
 
-    resetFailedLogin(id: string): Promise<UserWithRoles> {
+    resetFailedLogin(id: string): Promise<UserWithProfile> {
         return this.updateUser(id, { failedLoginAttempts: 0, lockedUntil: null });
     }
 
-    /**
-     * `visibleTo` applies the same rule the single-record admin routes enforce: an
-     * actor sees only accounts ranked below their own, plus themselves. Without it
-     * the list happily returned the super admin to any admin who asked, while
-     * fetching that same account by id answered 403.
-     */
-    async list(params: {
-        page: number;
-        limit: number;
-        search?: string;
-        roleId?: string;
-        status?: UserStatus;
-        deleted?: boolean;
-        visibleTo: { actorId: string; maxRank: number };
-    }): Promise<{ items: UserWithRoles[]; total: number }> {
-        const outranksActor = this.db
-            .select({ one: sql`1` })
-            .from(userRoles)
-            .innerJoin(roles, eq(roles.id, userRoles.roleId))
-            .where(and(eq(userRoles.userId, users.id), gte(roles.rank, params.visibleTo.maxRank)));
-
-        const hasRole = params.roleId
-            ? exists(
-                  this.db
-                      .select({ one: sql`1` })
-                      .from(userRoles)
-                      .where(and(eq(userRoles.userId, users.id), eq(userRoles.roleId, params.roleId))),
-              )
-            : undefined;
-
-        const pattern = params.search ? `%${escapeLike(params.search)}%` : undefined;
-
-        const where = and(
-            params.deleted ? isNotNull(users.deletedAt) : isNull(users.deletedAt),
-            or(eq(users.id, params.visibleTo.actorId), notExists(outranksActor)),
-            hasRole,
-            params.status ? eq(users.status, params.status) : undefined,
-            pattern
-                ? or(ilike(users.email, pattern), ilike(users.username, pattern), ilike(users.name, pattern))
-                : undefined,
-        );
-
-        const [page, total] = await Promise.all([
-            this.db
-                .select({ id: users.id })
-                .from(users)
-                .where(where)
-                .orderBy(desc(users.createdAt), desc(users.id))
-                .limit(toLimitOffset(params).limit)
-                .offset(toLimitOffset(params).offset),
-            this.db.$count(users, where),
-        ]);
-
-        if (page.length === 0) {
-            return { items: [], total };
-        }
-
-        const loaded = await this.db.query.users.findMany({
-            where: { id: { in: page.map(({ id }) => id) } },
-            with: withRoles,
-        });
-        const byId = new Map(loaded.map(user => [user.id, user]));
-
-        return { items: page.map(({ id }) => byId.get(id)!), total };
-    }
-
-    /**
-     * `resetEmailVerification` is set when the email address itself changed: the
-     * new address is unproven, and leaving `emailVerifiedAt` in place would treat
-     * it as confirmed — including for password-reset delivery.
-     */
-    updateByAdmin(
-        id: string,
-        data: Partial<Pick<User, "name" | "username" | "email" | "phone" | "avatarUrl">>,
-        options: { resetEmailVerification?: boolean } = {},
-    ): Promise<UserWithRoles> {
-        return this.updateUser(id, {
-            ...data,
-            ...(options.resetEmailVerification
-                ? { emailVerifiedAt: null, status: UserStatus.PENDING_VERIFICATION }
-                : {}),
-        });
-    }
-
-    updateStatus(id: string, status: UserStatus): Promise<UserWithRoles> {
+    updateStatus(id: string, status: UserStatus): Promise<UserWithProfile> {
         return this.updateUser(id, { status });
     }
 
-    softDelete(id: string): Promise<UserWithRoles> {
+    softDelete(id: string): Promise<UserWithProfile> {
         return this.updateUser(id, { deletedAt: new Date() });
     }
 
-    restore(id: string): Promise<UserWithRoles> {
+    restore(id: string): Promise<UserWithProfile> {
         return this.updateUser(id, { deletedAt: null });
     }
 
@@ -367,9 +280,4 @@ export class UsersService {
         const deleted = await this.db.delete(users).where(lt(users.deletedAt, cutoff)).returning({ id: users.id });
         return deleted.length;
     }
-}
-
-/** `%` and `_` in a search term are literals, not wildcards. */
-function escapeLike(term: string): string {
-    return term.replace(/[\\%_]/g, "\\$&");
 }
