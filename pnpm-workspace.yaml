@@ -1,7 +1,3 @@
 allowBuilds:
-  '@prisma/engines': false
   argon2: true
   esbuild: true
-  msgpackr-extract: set this to true or false
-  prisma: false
-  workerd: set this to true or false
